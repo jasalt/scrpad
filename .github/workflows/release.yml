@@ -1,7 +1,8 @@
 name: Release
 
-# Pushing a tag like v0.1.0 builds the `dist` profile on every platform (a universal .app on macOS) and publishes a GitHub
-# release with the archives and their checksums. Run it by hand to only build the archives.
+# Pushing a tag like v0.1.0 runs the CI gate (ci.yml), then builds the `dist` profile on every platform (a universal
+# .app on macOS) and publishes a GitHub release with the archives and their checksums. Run it by hand to only check and
+# build the archives.
 on:
   push:
     tags: ["v*"]
@@ -14,7 +15,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The whole CI gate (ci.yml) first: a release is built only from a commit that passes it.
+  check:
+    # A reusable workflow given as ./ is read from the same commit, never from the runner's disk;
+    # actionlint 1.7.12 does not parse the $/ form zizmor suggests.
+    uses: ./.github/workflows/ci.yml # zizmor: ignore[self-repository]
+    with:
+      checks-only: true
+
   build:
+    needs: check
     strategy:
       fail-fast: false
       matrix:
@@ -72,6 +82,7 @@ jobs:
             dist/*.zip
 
   macos:
+    needs: check
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

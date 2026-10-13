@@ -318,7 +318,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-`.github/workflows/release.yml` builds the `dist` profile for every platform and creates a GitHub release with the archives, `SHA256SUMS` and generated notes. The release is refused if the tag does not match the version in `Cargo.toml`.
+`.github/workflows/release.yml` first runs the CI gate (`ci.yml`, called as a reusable workflow) and builds nothing unless it passes. It then builds the `dist` profile for every platform and creates a GitHub release with the archives, `SHA256SUMS` and generated notes. The release is refused if the tag does not match the version in `Cargo.toml`.
 
 On macOS, `packaging/macos/bundle.sh` turns the Apple Silicon and Intel builds into one universal `scrpad.app`: it joins the binaries with `lipo`, fills in `packaging/macos/Info.plist`, builds the icon with `iconutil` and signs the bundle ad hoc. The same script runs locally on a Mac; its header lists the build commands. A bare executable would open in Terminal when started from Finder, which is why macOS gets an app bundle.
 

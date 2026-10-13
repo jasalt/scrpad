@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  # release.yml runs the same gate first and builds nothing unless it passes.
+  workflow_call:
+    inputs:
+      checks-only:
+        description: Skip the macOS and Windows builds; the release builds those itself.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -32,14 +39,16 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
       - run: just check
       - run: just secrets
+      # Not in a release: its last job publishes every artifact of the run.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
+        if: always() && !inputs.checks-only
         with:
           name: shots
           path: shots/
           if-no-files-found: ignore
 
   build:
+    if: ${{ !inputs.checks-only }}
     strategy:
       fail-fast: false
       matrix:
