@@ -77,7 +77,7 @@ pub fn run(window: Window) -> eframe::Result {
             }
             None => crate::scripts::answer(crate::store::State::default_path().as_deref(), &command, None),
         };
-        std::process::exit(finish(reply));
+        std::process::exit(finish(said(&command, reply)));
     }
     if tui {
         let (state, path, startup_error) = load();
@@ -198,7 +198,16 @@ fn outcome(command: &crate::cli::Command, reply: Reply) -> Outcome {
                 Err(e) => Outcome::Print(Reply::Error(e)),
             }
         }
-        (_, reply) => Outcome::Print(reply),
+        (command, reply) => Outcome::Print(said(command, reply)),
+    }
+}
+
+/// `--append` says `ok`, so a script or an agent sees it went in; a launch that shows the
+/// window stays quiet.
+fn said(command: &crate::cli::Command, reply: Reply) -> Reply {
+    match (command, reply) {
+        (crate::cli::Command::Append { .. }, Reply::Ok) => Reply::Text("ok".into()),
+        (_, reply) => reply,
     }
 }
 
@@ -248,5 +257,13 @@ mod tests {
         }
         assert!(matches!(outcome(&run, Reply::Text("sk-live".into())), Outcome::Print(Reply::Error(e)) if !e.contains("sk-live")));
         assert!(matches!(outcome(&Command::List, Reply::Text("x".into())), Outcome::Print(Reply::Text(_))));
+    }
+
+    #[test]
+    fn an_append_says_ok_and_a_launch_stays_quiet() {
+        let append = Command::Append { title: ".env".into(), text: "A=".into() };
+        assert!(matches!(outcome(&append, Reply::Ok), Outcome::Print(Reply::Text(t)) if t == "ok"));
+        assert!(matches!(outcome(&Command::Show, Reply::Ok), Outcome::Print(Reply::Ok)));
+        assert!(matches!(outcome(&Command::Toggle, Reply::Ok), Outcome::Print(Reply::Ok)));
     }
 }
