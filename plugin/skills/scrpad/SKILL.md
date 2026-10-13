@@ -23,7 +23,8 @@ printf '%s\n' 'cargo test --workspace -- --nocapture' | scrpad --append Agent -
 - Adds the text as a new paragraph to the note titled exactly `Agent` (made if missing).
   Use another title when the user names one. The text comes from stdin, at most 1 MiB.
 - It only adds: nothing in scrpad can be replaced or deleted this way. It answers `ok`.
-- An encrypted note refuses it.
+- An encrypted note takes it only while the user has it unlocked in scrpad; a locked one
+  refuses it. Either way you never get its text back.
 
 ## Reading a note
 

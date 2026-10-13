@@ -597,10 +597,18 @@ fn an_append_from_a_script_lands_in_the_background() {
     h.state_mut().session.save_now();
     assert_eq!(on_disk(), notes(&h));
 
-    // An encrypted note is refused, and no second note with its title is made.
+    // An unlocked encrypted note takes it in the window, and saves it only sealed.
     h.state_mut().session.encrypt_note("hunter2", 1.0).unwrap();
-    let Reply::Error(error) = ask(&socket, append("Scratchpad 2", "more")) else { panic!("appended to an encrypted note") };
-    assert!(error.contains("encrypted"), "{error}");
+    assert_eq!(ask(&socket, append("Scratchpad 2", "API_KEY=")), Reply::Ok);
+    h.run_steps(2);
+    h.get_by_label("Added to “Scratchpad 2”");
+    assert_eq!(notes(&h)[1].1, "API_KEY=");
+    h.state_mut().session.save_now();
+    assert!(!std::fs::read_to_string(&path).unwrap().contains("API_KEY="));
+    // A locked one is refused, and no second note with its title is made.
+    h.state_mut().session.lock_note(1.0);
+    let Reply::Error(error) = ask(&socket, append("Scratchpad 2", "more")) else { panic!("appended to a locked note") };
+    assert!(error.contains("locked"), "{error}");
     h.run_steps(2);
     assert_eq!(notes(&h).len(), 3);
     assert_eq!(State::load(&path).unwrap().notes.len(), 3);

@@ -29,6 +29,9 @@ pub struct Window {
     pub can_read: bool,
     pub hidden: HashSet<u64>,
     pub encrypted: HashSet<u64>,
+    /// The encrypted notes unlocked now: only the window has their password, so an append to
+    /// one goes to the window, which adds it and saves it sealed.
+    pub unlocked: HashSet<u64>,
     /// The window could not load the notes file and saves nothing, so scripts don't either.
     pub blocked: bool,
 }
@@ -41,6 +44,8 @@ impl Window {
         self.hidden.extend(state.notes.iter().filter(|n| n.hidden).map(|n| n.id));
         self.encrypted.clear();
         self.encrypted.extend(state.notes.iter().filter(|n| n.is_encrypted()).map(|n| n.id));
+        self.unlocked.clear();
+        self.unlocked.extend(state.notes.iter().filter(|n| n.is_encrypted() && !n.is_locked()).map(|n| n.id));
     }
 }
 
@@ -52,7 +57,7 @@ pub fn answer(path: Option<&Path>, command: &Command, window: Option<&mut Window
     carry_out(path, command, window).unwrap_or_else(Reply::Error)
 }
 
-fn carry_out(path: Option<&Path>, command: &Command, window: Option<&mut Window>) -> Result<Reply, String> {
+fn carry_out(path: Option<&Path>, command: &Command, mut window: Option<&mut Window>) -> Result<Reply, String> {
     // `--write` and `--run` wait for the user's answer, and only a running scrpad can ask.
     if command.needs_approval() {
         return Err(NOBODY_TO_ASK.into());
@@ -64,12 +69,17 @@ fn carry_out(path: Option<&Path>, command: &Command, window: Option<&mut Window>
     let mut state = State::load(path).map_err(|e| e.to_string())?;
     match command {
         Command::Append { title, text } => {
-            // Encrypted in the window, though not saved that way yet.
             let target = state.notes.iter().find(|n| n.title == *title);
-            if let (Some(w), Some(note)) = (window.as_deref(), target)
-                && w.encrypted.contains(&note.id)
-            {
-                return Err(encrypted(title));
+            if let (Some(w), Some(note)) = (window.as_deref_mut(), target) {
+                // Never into the file: the window adds it and saves the note sealed.
+                if w.unlocked.contains(&note.id) {
+                    w.appends.push((title.clone(), text.clone()));
+                    return Ok(Reply::Ok);
+                }
+                // Encrypted in the window, though not saved that way yet.
+                if w.encrypted.contains(&note.id) {
+                    return Err(locked(title));
+                }
             }
             append(&mut state, title, text)?;
             state.save(path).map_err(|e| format!("could not save {}: {e}", path.display()))?;
@@ -84,15 +94,16 @@ fn carry_out(path: Option<&Path>, command: &Command, window: Option<&mut Window>
     }
 }
 
-fn encrypted(title: &str) -> String {
-    format!("“{title}” is encrypted; scripts cannot add to it")
+fn locked(title: &str) -> String {
+    format!("“{title}” is encrypted and locked; unlock it in scrpad to add to it")
 }
 
 /// Adds `text` as a new paragraph to the first note titled `title` in tab order, or to a new
-/// note with that title after the others. An encrypted note is refused, and no other is made.
+/// note with that title after the others. A locked note is refused, and no other is made; only
+/// a window unlocks one, and it seals what was added.
 pub fn append(state: &mut State, title: &str, text: &str) -> Result<(), String> {
     match state.notes.iter().position(|n| n.title == title) {
-        Some(i) if state.notes[i].is_encrypted() => return Err(encrypted(title)),
+        Some(i) if state.notes[i].is_locked() => return Err(locked(title)),
         Some(i) => {
             let note = &mut state.notes[i].text;
             // One blank line between paragraphs, however the note ends.
@@ -206,16 +217,26 @@ mod tests {
     }
 
     #[test]
-    fn an_encrypted_note_is_refused_and_not_duplicated() {
+    fn a_locked_note_is_refused_and_not_duplicated() {
         let mut s = state(vec![note("Keys", "sk-live"), note("Other", "")]);
         s.notes[0].encrypt("pw").unwrap();
         let cipher = s.notes[0].cipher.clone();
-        assert!(append(&mut s, "Keys", "more").unwrap_err().contains("encrypted"));
-        assert_eq!(titles(&s), ["Keys", "Other"]);
-        assert_eq!((s.notes[0].text.as_str(), &s.notes[0].cipher), ("sk-live", &cipher));
         s.notes[0].lock();
-        assert!(append(&mut s, "Keys", "more").is_err());
-        assert_eq!(s.notes.len(), 2);
+        let e = append(&mut s, "Keys", "more").unwrap_err();
+        assert!(e.contains("locked") && e.contains("unlock it"), "{e}");
+        assert_eq!(titles(&s), ["Keys", "Other"]);
+        assert_eq!(s.notes[0].cipher, cipher);
+    }
+
+    #[test]
+    fn an_unlocked_encrypted_note_takes_the_append_and_stays_encrypted() {
+        // Only the window, which has the password, holds an unlocked note.
+        let mut s = state(vec![note("Keys", "A=1"), note("Other", "")]);
+        s.notes[0].encrypt("pw").unwrap();
+        append(&mut s, "Keys", "B=").unwrap();
+        assert_eq!(titles(&s), ["Keys", "Other"]);
+        assert_eq!(s.notes[0].text, "A=1\n\nB=");
+        assert!(s.notes[0].is_encrypted() && !s.notes[0].is_locked());
     }
 
     #[test]
@@ -334,12 +355,42 @@ mod tests {
         window.track(&s);
         assert_eq!(answer(Some(&path), &append_cmd("Agent", "pwd"), Some(&mut window)), Reply::Ok);
         assert_eq!(window.appends, [("Agent".to_owned(), "pwd".to_owned())]);
-        assert!(matches!(answer(Some(&path), &append_cmd("Vault", "x"), Some(&mut window)), Reply::Error(_)));
-        assert_eq!(window.appends.len(), 1);
         assert_eq!(State::load(&path).unwrap().notes[0].text, "pwd");
         window.blocked = true;
         assert!(matches!(answer(Some(&path), &append_cmd("Agent", "x"), Some(&mut window)), Reply::Error(_)));
         assert_eq!(State::load(&path).unwrap().notes[0].text, "pwd");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_unlocked_encrypted_note_gets_the_append_only_through_the_window() {
+        let (path, dir) = temp_notes("unlocked");
+        let mut s = state(vec![note("Agent", ""), note(".env", "A=1"), note("Vault", "secret")]);
+        s.notes[1].encrypt("pw").unwrap();
+        s.notes[2].encrypt("pw").unwrap();
+        s.save(&path).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        // The window has .env unlocked and Vault locked.
+        s.notes[2].lock();
+        let mut window = Window::default();
+        window.track(&s);
+
+        assert_eq!(answer(Some(&path), &append_cmd(".env", "B=2"), Some(&mut window)), Reply::Ok);
+        assert_eq!(window.appends, [(".env".to_owned(), "B=2".to_owned())]);
+        // The window adds it and saves it sealed; the file is not touched here.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+        let Reply::Error(e) = answer(Some(&path), &append_cmd("Vault", "x"), Some(&mut window)) else {
+            panic!("appended to a locked note")
+        };
+        assert!(e.contains("locked"), "{e}");
+        assert_eq!(window.appends.len(), 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+        // No window: nothing could seal it.
+        let Reply::Error(e) = answer(Some(&path), &append_cmd(".env", "C=3"), None) else { panic!("appended with no window") };
+        assert!(e.contains("locked"), "{e}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

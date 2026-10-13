@@ -210,14 +210,19 @@ impl Session {
     }
 
     /// Saves right away, first re-sealing every stale encrypted note on this thread (on quit).
+    /// Appends to an unlocked encrypted note are taken in before it is sealed, under the scripts
+    /// lock, so none answered `ok` misses the cipher.
     pub fn save_now(&mut self) -> bool {
+        let shared = self.scripts.clone();
+        let mut window = lock(&shared);
+        self.take_appends(&mut window, None);
         for i in 0..self.state.notes.len() {
             self.seal_sync(i);
         }
         if self.state.notes.iter().any(|note| self.is_stale(note)) {
             return false;
         }
-        self.write()
+        self.write_with(&mut window)
     }
 
     /// The debounced autosave: stale encrypted notes are re-sealed on a worker and written
@@ -254,14 +259,17 @@ impl Session {
     }
 
     fn write(&mut self) -> bool {
+        let shared = self.scripts.clone();
+        self.write_with(&mut lock(&shared))
+    }
+
+    /// Saves under the scripts lock, held by the caller, with the appends scripts saved meanwhile
+    /// added first: an append already in the file is never overwritten by a save without it.
+    fn write_with(&mut self, window: &mut scripts::Window) -> bool {
         if self.save_blocked {
             return false;
         }
-        // Saved under the scripts lock, with the appends scripts saved meanwhile added first: an
-        // append already in the file is never overwritten by a save without it.
-        let shared = self.scripts.clone();
-        let mut window = lock(&shared);
-        self.take_appends(&mut window, None);
+        self.take_appends(window, None);
         match self.path.as_ref().map_or(Ok(()), |path| self.state.save(path)) {
             Ok(()) => {
                 // A toast (and its Undo) stays: it was shown beside the error and expires on its own.
@@ -707,19 +715,27 @@ impl Session {
 
     /// Drops the plaintext and password of the current note from memory.
     pub fn lock_note(&mut self, now: f64) {
+        // Under the scripts lock from the appends taken in to the save: none is left out.
+        let shared = self.scripts.clone();
+        let mut window = lock(&shared);
+        self.take_appends(&mut window, None);
         if !self.lock_at(self.state.active) {
             return;
         }
         self.epoch += 1;
         // Replaces any Undo toast too: its plaintext must not outlive the lock.
         self.toast = None;
-        if self.write() {
+        if self.write_with(&mut window) {
             self.toast(now, "Locked", None);
         }
     }
 
     /// Locks every unlocked encrypted note; returns how many.
     pub fn lock_all(&mut self) -> usize {
+        // Under the scripts lock from the appends taken in to the save: none is left out.
+        let shared = self.scripts.clone();
+        let mut window = lock(&shared);
+        self.take_appends(&mut window, None);
         let locked = (0..self.state.notes.len()).filter(|&i| self.lock_at(i)).count();
         // An Undo for a closed or cleared encrypted note holds its plaintext too.
         if self.toast.as_ref().is_some_and(|t| matches!(&t.action, Some(ToastAction::Undo(u)) if u.holds_secret())) {
@@ -727,8 +743,9 @@ impl Session {
         }
         if locked > 0 {
             self.epoch += 1;
-            self.write();
+            self.write_with(&mut window);
         }
+        window.track(&self.state);
         locked
     }
 
@@ -1164,5 +1181,56 @@ mod tests {
             jobs.send(SealJob { id, epoch: 0, text: Zeroizing::new(text.into()), password: Zeroizing::new("pw".into()) }).unwrap();
         }
         assert_eq!([results.recv().unwrap().id, results.recv().unwrap().id], [1, 2]);
+    }
+
+    /// A session with `.env` encrypted, unlocked and saved, and `B=2` appended to it by a script.
+    fn env_with_append(name: &str) -> (Session, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("scrpad-sealed-append-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut env = note(".env", "A=1");
+        env.encrypt("pw").unwrap();
+        let mut s = Session::new(State { notes: vec![env], ..State::default() }, Some(dir.join("notes.json")), None, Arc::new(|_| {}));
+        assert!(s.save_now());
+        let server = s.script_server();
+        assert_eq!(server(&Command::Append { title: ".env".into(), text: "B=2".into() }), Reply::Ok);
+        (s, dir)
+    }
+
+    /// The `.env` the file holds: never as plaintext, and with the append once unlocked.
+    fn sealed_env_on_disk(dir: &std::path::Path) -> String {
+        let json = std::fs::read_to_string(dir.join("notes.json")).unwrap();
+        assert!(!json.contains("A=1") && !json.contains("B=2"), "{json}");
+        let mut loaded = State::load(&dir.join("notes.json")).unwrap();
+        let env = loaded.notes.iter_mut().find(|n| n.title == ".env").unwrap();
+        env.unlock("pw").unwrap();
+        env.text.clone()
+    }
+
+    #[test]
+    fn an_append_to_an_unlocked_encrypted_note_is_saved_sealed() {
+        let (mut s, dir) = env_with_append("frame");
+        let shared = s.scripts.clone();
+        s.take_appends(&mut super::lock(&shared), Some(1.0));
+        assert_eq!(s.state.notes[0].text, "A=1\n\nB=2");
+        assert!(s.save_now());
+        assert_eq!(sealed_env_on_disk(&dir), "A=1\n\nB=2");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn locking_right_after_an_append_seals_it_in() {
+        let (mut s, dir) = env_with_append("lock");
+        s.lock_note(1.0);
+        assert!(s.state.notes[0].is_locked());
+        assert_eq!(sealed_env_on_disk(&dir), "A=1\n\nB=2");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn quitting_right_after_an_append_seals_it_in() {
+        let (mut s, dir) = env_with_append("quit");
+        assert!(s.save_now());
+        assert_eq!(sealed_env_on_disk(&dir), "A=1\n\nB=2");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
