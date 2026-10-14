@@ -46,3 +46,25 @@ secrets-staged:
 setup:
     mise install
     git config core.hooksPath .githooks
+
+# Pushes main and the tag together, so the tag is not left behind as with a plain `git push`.
+# Publish a release: bump the version, run the gate, commit, tag and push (`just release 0.3.2`).
+release version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    new="{{ version }}"
+    [[ "$new" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "usage: just release X.Y.Z" >&2; exit 1; }
+    [[ "$(git branch --show-current)" == main ]] || { echo "not on main" >&2; exit 1; }
+    git diff --quiet HEAD || { echo "uncommitted changes" >&2; exit 1; }
+    git fetch --quiet origin main --tags
+    [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]] || { echo "main differs from origin/main" >&2; exit 1; }
+    git rev-parse -q --verify "refs/tags/v$new" >/dev/null && { echo "tag v$new exists" >&2; exit 1; }
+    old=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+    sed -i "0,/^version = \"$old\"/s//version = \"$new\"/" Cargo.toml
+    sed -i "s/\"version\": \"$old\"/\"version\": \"$new\"/" plugin/.claude-plugin/plugin.json
+    cargo update --offline -p scrpad
+    just check
+    git add Cargo.toml Cargo.lock plugin/.claude-plugin/plugin.json
+    git commit -m "Release $new"
+    git tag "v$new"
+    git push origin main "v$new"

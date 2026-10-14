@@ -311,12 +311,13 @@ The README images in `docs/` are copies of `shots/dark.png` (as `screenshot.png`
 
 ## Releasing
 
-CI (`.github/workflows/ci.yml`) runs `just check` and a gitleaks scan of the history on Linux and checks that the app builds on macOS and Windows. To publish a release, bump `version` in `Cargo.toml` and in `plugin/.claude-plugin/plugin.json` (a test holds them equal), commit, and push a matching tag:
+CI (`.github/workflows/ci.yml`) runs `just check` and a gitleaks scan of the history on Linux and checks that the app builds on macOS and Windows. To publish a release, run on an up-to-date, clean `main`:
 
 ```
-git tag v0.1.0
-git push origin v0.1.0
+just release 0.1.0
 ```
+
+It bumps `version` in `Cargo.toml`, `Cargo.lock` and `plugin/.claude-plugin/plugin.json` (a test holds them equal), runs `just check`, commits, tags `v0.1.0` and pushes `main` and the tag together.
 
 `.github/workflows/release.yml` first runs the CI gate (`ci.yml`, called as a reusable workflow) and builds nothing unless it passes. It then builds the `dist` profile for every platform and creates a GitHub release with the archives, `SHA256SUMS` and generated notes. The release is refused if the tag does not match the version in `Cargo.toml`.
 
