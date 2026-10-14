@@ -29,7 +29,8 @@ static SOURCES: &[(&str, &str)] = icons![
     "lock",
     "lock-open",
     "screen-share",
-    "screen-share-off"
+    "screen-share-off",
+    "triangle-alert"
 ];
 
 fn white() -> &'static HashMap<&'static str, &'static [u8]> {

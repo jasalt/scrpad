@@ -1,5 +1,6 @@
 //! The command line: `scrpad [--tui] [--toggle | --new | - | --append TITLE TEXT | --list | --read TITLE |
-//! --write TITLE DIR | --run TITLE -- CMD… | --skill]`.
+//! --write TITLE DIR | --run TITLE -- CMD… | --skill]`, and `scrpad --install-agent TARGET` or
+//! `--uninstall-agent TARGET`, each with `--dry-run`, to set scrpad up for an AI agent.
 
 use std::io::Read;
 
@@ -17,6 +18,8 @@ scrpad: a tiny floating scratchpad
 
 Usage: scrpad [--tui] [--toggle | --new | - | --append TITLE TEXT | --list | --read TITLE
               | --write TITLE DIR | --run TITLE -- CMD… | --skill]
+       scrpad --install-agent codex|skill|claude [--dry-run]
+       scrpad --uninstall-agent codex|skill|claude [--dry-run]
 
   (nothing)            show the window
   --tui                open the notes in this terminal instead (alone, or with --new or -);
@@ -33,12 +36,20 @@ Usage: scrpad [--tui] [--toggle | --new | - | --append TITLE TEXT | --list | --r
   --run TITLE -- CMD   run CMD with the note's KEY=VALUE lines as environment variables,
                        once you allow it in scrpad; the note's text is never printed
   --skill              print the SKILL.md that teaches an AI agent these commands
+  --install-agent T    set scrpad up for an agent: codex = the skill and the hook that keeps it
+                       from reading .env files; skill = the skill only (Gemini CLI, and others
+                       that read ~/.agents/skills); claude = how, as it comes with the plugin.
+                       Run it again after updating scrpad: that is the upgrade
+  --uninstall-agent T  take away what --install-agent put there
+  --dry-run            with these two: say what would change, and change nothing
   -h, --help           show this help
 
 A running scrpad takes over: it shows the window and adds the note. --append, --list and
 --read leave the window as it is, and work on the notes file when no scrpad runs.
---list and --read need \"Let scripts read notes\" in the … menu; hidden and encrypted
-notes are never listed or read, and --append refuses an encrypted note.
+--list and --read follow \"Let scripts read notes\" in the … menu. Off refuses both. Ask each
+time: --list works, and --read waits for you to allow it in a running scrpad. Always: no
+question; findings that look like instructions for an AI are printed on stderr. Hidden and
+encrypted notes are never listed or read, and --append refuses an encrypted note.
 --write and --run need a running scrpad (window or --tui) to ask you, every time.
 ";
 
@@ -52,6 +63,42 @@ pub enum Parsed {
     Launch(Launch),
     /// `--help` and `--skill`.
     Print(&'static str),
+    /// `--install-agent` and `--uninstall-agent`: set an agent up, or undo it. Starts no window.
+    Agent {
+        target: AgentTarget,
+        uninstall: bool,
+        dry_run: bool,
+    },
+}
+
+/// Which agent `--install-agent` sets scrpad up for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentTarget {
+    /// The skill, and the `.env` guard hook.
+    Codex,
+    /// The skill only, for any agent that reads Agent Skills from `~/.agents/skills`.
+    Skill,
+    /// Nothing to do: the plugin brings both.
+    Claude,
+}
+
+impl AgentTarget {
+    fn parse(name: &str) -> Result<Self, String> {
+        match name {
+            "codex" => Ok(Self::Codex),
+            "skill" => Ok(Self::Skill),
+            "claude" => Ok(Self::Claude),
+            other => Err(format!("unknown agent “{other}”: codex, skill or claude (see scrpad --help)")),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Skill => "skill",
+            Self::Claude => "claude",
+        }
+    }
 }
 
 /// A launch: what it asks for, and whether it opens the notes in the terminal (`--tui`).
@@ -94,6 +141,12 @@ impl Command {
     pub fn needs_approval(&self) -> bool {
         matches!(self, Command::Write { .. } | Command::Run { .. })
     }
+
+    /// May wait for the user: the two above, and `--read`, which waits when reading is set to
+    /// ask each time.
+    pub fn may_wait(&self) -> bool {
+        self.needs_approval() || matches!(self, Command::Read(_))
+    }
 }
 
 /// What `args` (without the program name) ask for. Reads `stdin` only for `-` and
@@ -102,14 +155,28 @@ pub fn parse(args: impl Iterator<Item = String>, stdin: impl Read) -> Result<Par
     let mut args = args.peekable();
     let mut wish = None;
     let mut tui = false;
+    let mut dry_run = false;
     while let Some(arg) = args.next() {
         let mut value = |what: &str| args.next().ok_or_else(|| format!("{arg} needs {what} (see scrpad --help)"));
         let command = match arg.as_str() {
             "-h" | "--help" => return Ok(Parsed::Print(HELP)),
-            "--skill" => return Ok(Parsed::Print(SKILL)),
+            "--skill" => {
+                if dry_run || args.any(|a| a == "--dry-run") {
+                    return Err("--dry-run goes only with --install-agent or --uninstall-agent (see scrpad --help)".into());
+                }
+                return Ok(Parsed::Print(SKILL));
+            }
             "--tui" => {
                 tui = true;
                 continue;
+            }
+            "--dry-run" => {
+                dry_run = true;
+                continue;
+            }
+            "--install-agent" | "--uninstall-agent" => {
+                let target = AgentTarget::parse(&value("an agent: codex, skill or claude")?)?;
+                Wish::Agent(target, arg == "--uninstall-agent")
             }
             "--toggle" => Wish::Toggle,
             "--new" => Wish::New,
@@ -140,9 +207,15 @@ pub fn parse(args: impl Iterator<Item = String>, stdin: impl Read) -> Result<Par
             return Err("give only one command (see scrpad --help)".into());
         }
     }
+    if dry_run && !matches!(wish, Some(Wish::Agent(..))) {
+        return Err("--dry-run goes only with --install-agent or --uninstall-agent (see scrpad --help)".into());
+    }
     // The terminal UI opens the notes: what hides a window or only runs a script has no place.
     if tui && !matches!(wish, None | Some(Wish::New | Wish::Stdin)) {
         return Err("--tui goes only with --new or - (see scrpad --help)".into());
+    }
+    if let Some(Wish::Agent(target, uninstall)) = wish {
+        return Ok(Parsed::Agent { target, uninstall, dry_run });
     }
     let command = match wish {
         None => Command::Show,
@@ -170,6 +243,7 @@ pub fn parse(args: impl Iterator<Item = String>, stdin: impl Read) -> Result<Par
             }
             Command::Write { title, dir }
         }
+        Some(Wish::Agent(..)) => unreachable!("returned above"),
         Some(Wish::Run(title, argv)) => {
             check_title(&title)?;
             if argv.is_empty() {
@@ -194,6 +268,7 @@ enum Wish {
     Read(String),
     Write(String, String),
     Run(String, Vec<String>),
+    Agent(AgentTarget, bool),
 }
 
 /// A title is one line of at most `MAX_TITLE` bytes, as the rename field makes them.
@@ -249,7 +324,7 @@ mod tests {
     fn launch_with(args: &[&str], stdin: &[u8]) -> Result<Option<Launch>, String> {
         parse(args.iter().map(|s| s.to_string()), stdin).map(|parsed| match parsed {
             Parsed::Launch(launch) => Some(launch),
-            Parsed::Print(_) => None,
+            Parsed::Print(_) | Parsed::Agent { .. } => None,
         })
     }
 
@@ -323,6 +398,9 @@ mod tests {
         let both = [Command::Write { title: "a".into(), dir: "/".into() }, Command::Run { title: "a".into(), argv: vec!["x".into()] }];
         assert!(both.iter().all(|c| c.is_script() && c.needs_approval()));
         assert!(![Command::List, append("a", "b")].iter().any(Command::needs_approval));
+        assert!(both.iter().all(Command::may_wait));
+        assert!(Command::Read("a".into()).may_wait() && !Command::Read("a".into()).needs_approval());
+        assert!(![Command::List, append("a", "b")].iter().any(Command::may_wait));
     }
 
     #[test]
@@ -335,6 +413,24 @@ mod tests {
         assert!(parse_with(&["--run", "a/b", "--", "x"], b"").is_ok(), "a --run title is a note title, not a file name");
         assert!(parse_with(&["--run", ".env", "--", &"x".repeat(MAX_ARGV)], b"").unwrap_err().contains("64 KiB"));
         assert!(launch_with(&["--tui", "--write", ".env", "/tmp"], b"").unwrap_err().contains("--tui goes only"));
+    }
+
+    #[test]
+    fn agent_commands_take_a_target_and_a_dry_run() {
+        let agent = |args: &[&str]| parse(args.iter().map(|s| s.to_string()), &b""[..]);
+        let want = |target, uninstall, dry_run| Ok(Parsed::Agent { target, uninstall, dry_run });
+        assert_eq!(agent(&["--install-agent", "codex"]), want(AgentTarget::Codex, false, false));
+        assert_eq!(agent(&["--dry-run", "--install-agent", "skill"]), want(AgentTarget::Skill, false, true));
+        assert_eq!(agent(&["--uninstall-agent", "claude", "--dry-run"]), want(AgentTarget::Claude, true, true));
+        assert!(agent(&["--install-agent"]).unwrap_err().contains("needs an agent"));
+        assert!(agent(&["--install-agent", "vim"]).unwrap_err().contains("unknown agent “vim”"));
+        assert!(agent(&["--dry-run"]).unwrap_err().contains("--dry-run goes only"));
+        assert!(agent(&["--skill", "--dry-run"]).unwrap_err().contains("--dry-run goes only"));
+        assert!(agent(&["--dry-run", "--skill"]).unwrap_err().contains("--dry-run goes only"));
+        assert!(agent(&["--list", "--dry-run"]).unwrap_err().contains("--dry-run goes only"));
+        assert!(agent(&["--install-agent", "codex", "--list"]).unwrap_err().contains("only one"));
+        assert!(agent(&["--install-agent", "codex", "--uninstall-agent", "codex"]).unwrap_err().contains("only one"));
+        assert!(agent(&["--tui", "--install-agent", "codex"]).unwrap_err().contains("--tui goes only"));
     }
 
     #[test]

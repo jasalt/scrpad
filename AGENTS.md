@@ -25,8 +25,10 @@ or add one narrow suppression with the reason next to it.
 | `src/hyprland.rs` | Hyprland IPC for pinning | window-manager work |
 | `src/update.rs` | user-started check for a newer GitHub release | anything network-related |
 | `src/cli.rs`, `src/instance.rs` | command line, single-instance socket/pipe protocol | launch and socket work |
+| `src/scan.rs` | scan of note text for orders aimed at an AI and hidden characters: line numbers and labels | warnings, anything near reading notes |
 | `src/scripts.rs` | `--append`/`--list`/`--read`: what scripts and agents may do | anything near script access |
 | `src/handoff.rs` | --write/--run: target checks, private atomic write, .env parsing, the child | anything near handing notes out |
+| `src/agents.rs` | `--install-agent`/`--uninstall-agent`: the skill and the Codex hook in the user's home, ownership by digest | anything that writes outside notes.json, agent setup |
 | `src/clipboard.rs` | clears a copied secret if the clipboard still holds it | clipboard work |
 | `src/tui/` | terminal frontend (`--tui`): keys and drawing, own editor, terminal loop | terminal UI work |
 | `plugin/`, `.claude-plugin/` | Claude Code plugin: the skill (`scrpad --skill` prints it too) and the `.env` hook | agent instructions or the hook |
@@ -44,9 +46,12 @@ or add one narrow suppression with the reason next to it.
 - No network access unless the user explicitly asks (`…` → Check for updates…, `src/update.rs`).
   No telemetry, no automatic or start-up checks; tests never call GitHub.
 - Scripts (`src/scripts.rs`) only ever append: they never replace or delete anything, and never
-  read a hidden or an encrypted note. Reading the others is off unless the user turns it on.
+  read a hidden or an encrypted note. Reading is Off unless the user picks Ask (each `--read`
+  allowed in scrpad, every time; `--list` gives titles only) or Always. Scan findings carry a
+  line number and a label, never the note's text, and the scanner never changes the text.
   `--write` and `--run` hand a note over only after the user allows that one request in scrpad;
   a note's text is never printed by scrpad, never in an error or a toast; the `--run` reply goes
   only to the requesting client.
+- The agent installer never overwrites a file it did not write: it moves it aside to `.bak`. It never touches other tools' entries in `hooks.json`, and tests use temp dirs, never the real home.
 - The crypto format stays compatible with SimpleTextCrypt 5.x (`tests/data/` vectors).
 - After visual changes, refresh the README images in `docs/` from `shots/`.

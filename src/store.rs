@@ -147,6 +147,30 @@ pub enum FontStyle {
     Mono,
 }
 
+/// Whether `scrpad --list` and `--read` may read the notes that are neither hidden nor encrypted.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ReadMode {
+    /// `--list` works; each `--read` waits for the user to allow it in a running scrpad.
+    Ask,
+    /// Both work with no question.
+    Always,
+    /// Both are refused. Also what any unknown value loads as.
+    #[default]
+    #[serde(other)]
+    Off,
+}
+
+impl ReadMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            ReadMode::Off => "Off",
+            ReadMode::Ask => "Ask each time",
+            ReadMode::Always => "Always",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct State {
@@ -167,9 +191,9 @@ pub struct State {
     pub auto_lock: bool,
     /// Hide again, on the same occasions, the hidden notes revealed since.
     pub auto_rehide: bool,
-    /// `scrpad --list` and `--read` may read the notes that are neither hidden nor encrypted.
-    /// Off unless the user turns it on: what a script reads may end up with an AI provider.
-    pub scripts_can_read: bool,
+    /// What `scrpad --list` and `--read` may do. Off unless the user chooses otherwise: what a
+    /// script reads may end up with an AI provider.
+    pub script_reading: ReadMode,
     /// Keep the whole window out of screenshots, recordings and screen sharing, not only
     /// while a hidden or encrypted note is open (the GUI does that regardless).
     pub hide_from_capture: bool,
@@ -189,7 +213,7 @@ impl Default for State {
             next_id: 1,
             auto_lock: true,
             auto_rehide: true,
-            scripts_can_read: false,
+            script_reading: ReadMode::Off,
             hide_from_capture: false,
         };
         state.fix_up();
@@ -318,7 +342,7 @@ impl State {
     }
 }
 
-fn next_backup_path(path: &Path) -> PathBuf {
+pub(crate) fn next_backup_path(path: &Path) -> PathBuf {
     for suffix in 0_u64.. {
         let ending = if suffix == 0 { ".bak".to_owned() } else { format!(".bak.{suffix}") };
         let mut name = path.file_name().unwrap_or_default().to_os_string();
@@ -516,11 +540,15 @@ mod tests {
         assert!(!s.notes[0].is_encrypted());
         assert!(s.notes[1].is_locked() && s.notes[1].text.is_empty());
         // Options added later default to on, except reading by scripts.
-        assert!(s.auto_lock && s.auto_rehide && !s.scripts_can_read);
+        assert!(s.auto_lock && s.auto_rehide && s.script_reading == ReadMode::Off);
         let s: State = serde_json::from_str(r#"{"auto_lock":false}"#).unwrap();
         assert!(!s.auto_lock && s.auto_rehide);
-        let s: State = serde_json::from_str(r#"{"scripts_can_read":true}"#).unwrap();
-        assert!(s.scripts_can_read);
+        let s: State = serde_json::from_str(r#"{"script_reading":"ask"}"#).unwrap();
+        assert_eq!(s.script_reading, ReadMode::Ask);
+        let s: State = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(s.script_reading, ReadMode::Ask);
+        let s: State = serde_json::from_str(r#"{"script_reading":"bogus"}"#).unwrap();
+        assert_eq!(s.script_reading, ReadMode::Off);
     }
 
     #[test]

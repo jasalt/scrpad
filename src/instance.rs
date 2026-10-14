@@ -9,7 +9,8 @@
 //! `toggle` or `list`, or a line of lengths followed by that many bytes of UTF-8:
 //! `note <len>` + text, `append <title len> <text len>` + title + text, `read <title len>` +
 //! title, `write <title len> <dir len>` + title + dir, `run <title len> <argv len>` + title +
-//! argv joined by NUL; they wait for the user's answer up to 2 minutes. The reply is `ok`, `text <len>` + text, `error <message>`, or `busy` from a
+//! argv joined by NUL; those three wait for the user's answer up to 2 minutes (`read` only when
+//! reading is set to ask each time). The reply is `ok`, `text <len>` + text, `error <message>`, or `busy` from a
 //! `scrpad --append` that writes the notes file with no window running: try again in a moment.
 //! Older versions read one line, answer at most `note` (with `ok`) and hang up. Every read is
 //! bounded in size and time.
@@ -272,7 +273,7 @@ pub fn hold<T>(listener: Listener, address: &Path, work: impl FnOnce() -> T) -> 
 
 /// Sends `command` and waits for the answer.
 fn send(stream: &Stream, command: &Command) -> io::Result<Reply> {
-    let limit = if command.needs_approval() { APPROVAL_TIMEOUT } else { ANSWER_TIMEOUT };
+    let limit = if command.may_wait() { APPROVAL_TIMEOUT } else { ANSWER_TIMEOUT };
     within(stream, limit, || {
         let mut writer = stream;
         writer.write_all(&encode(command))?;
@@ -281,7 +282,7 @@ fn send(stream: &Stream, command: &Command) -> io::Result<Reply> {
             // Older versions hang up without a word once they have shown or toggled the window.
             None if matches!(command, Command::Show | Command::Toggle) => Ok(Reply::Ok),
             // It quit while asking the user, most likely; an older version hangs up the same way.
-            None if command.needs_approval() => {
+            None if command.may_wait() => {
                 Err(io::Error::other("scrpad closed before you answered (or the running scrpad is an older version; restart it)"))
             }
             None => Err(io::Error::other("the running scrpad did not take the command; restart it if it is an older version")),
