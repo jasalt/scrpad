@@ -27,6 +27,7 @@ const HOOK_JQ: &str = include_str!("../plugin/hooks/handoff-files.jq");
 const SKILL_DIGESTS: &[&str] = &[
     "35158bffb03f8608826a0cf8c74b3ce6c11b757a31a7741e2e55be61c73229da",
     "560fae66d7e0a016ac990460ef0ad2697f4b2e5b10fb9958d62781c7bc912371",
+    "6e0acbcd81db95e5d0cde62dc5b75e9dc2f2b18f3d2cf1371dc3653aea401b94",
 ];
 const SH_DIGESTS: &[&str] = &["7fddac538679daba80d4ccfe3eb6a1ada7faa45c43237ed19fdc0126d3a3ae21"];
 const JQ_DIGESTS: &[&str] = &["b5ce7674c323114a0f83a50a2da8c80d8cca84e696217f32528c03b26ae2d00e"];
