@@ -17,7 +17,7 @@ categories = ["gui", "text-editors"]
 egui = "0.36"
 egui_extras = { version = "0.36", default-features = false, features = ["svg"] }
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "wayland", "x11", "accesskit", "links"] }
-rfd = "0.16"
+rfd = "0.17"
 serde = { version = "1", features = ["derive"] }
 # preserve_order: hooks.json keeps the key order of the user's other hooks (src/agents.rs).
 serde_json = { version = "1", features = ["preserve_order"] }
