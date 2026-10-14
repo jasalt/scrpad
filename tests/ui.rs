@@ -56,6 +56,24 @@ fn looks_like_the_reference() {
     shot(&mut h, "light");
 }
 
+/// The README's first image: a working note next to a hidden, a locked and an agent's note.
+#[test]
+fn hero() {
+    let _guard = ui_test_guard();
+    let note = |title: &str, text: &str| Note { text: text.into(), ..Note::new(title.into()) };
+    let today = note(
+        "Today",
+        "Release 0.4\n- refresh the screenshots\n- just release 0.4.0\n\nStandup\n- read approval is merged\n- ask about the Hyprland 0.55 pin syntax\n\nssh deploy@build-01 'journalctl -u app -f'",
+    );
+    let env = Note { hidden: true, ..note(".env", "OPENAI_API_KEY=sk-live-example\nDATABASE_URL=postgres://app@localhost/app") };
+    let passwords = Note { cipher: Some("locked".into()), ..note("Passwords", "") };
+    let agent = note("Agent", "cargo test --locked");
+    let state = State { notes: vec![today, env, passwords, agent], active: 0, ..State::default() };
+    let mut h = harness_sized(state, None, egui::vec2(560.0, 340.0));
+    assert!(h.state().session.state.notes[2].is_locked());
+    shot(&mut h, "hero");
+}
+
 #[test]
 fn add_hide_and_close_notes() {
     let _guard = ui_test_guard();
