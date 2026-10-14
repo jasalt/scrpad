@@ -1,6 +1,6 @@
 [package]
 name = "scrpad"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 # `scrpad-console` is the Windows `scrpad.com`; plain `cargo run` means the app.
 default-run = "scrpad"
