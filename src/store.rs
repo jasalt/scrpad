@@ -318,7 +318,7 @@ impl State {
     }
 }
 
-fn next_backup_path(path: &Path) -> PathBuf {
+pub(crate) fn next_backup_path(path: &Path) -> PathBuf {
     for suffix in 0_u64.. {
         let ending = if suffix == 0 { ".bak".to_owned() } else { format!(".bak.{suffix}") };
         let mut name = path.file_name().unwrap_or_default().to_os_string();

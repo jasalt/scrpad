@@ -1,5 +1,6 @@
 //! Scratchpad: a tiny frameless floating notepad. egui draws every pixel; the OS only gives a window.
 
+pub mod agents;
 mod app;
 pub mod cli;
 pub mod clipboard;

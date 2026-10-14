@@ -32,11 +32,17 @@ pub fn run(window: Window) -> eframe::Result {
             print!("{text}");
             return Ok(());
         }
+        Ok(crate::cli::Parsed::Agent { target, uninstall, dry_run }) => {
+            std::process::exit(crate::agents::run(target, uninstall, dry_run));
+        }
         Err(error) => {
             eprintln!("scrpad: {error}");
             std::process::exit(2);
         }
     };
+    if command.is_script() {
+        crate::agents::warn_if_stale();
+    }
     // A running scrpad takes over a second launch (and `--toggle` from a compositor key).
     let address = crate::instance::address();
     let listener = match &address {

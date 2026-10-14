@@ -74,9 +74,11 @@ scrpad --read TITLE         print the text of a note
 scrpad --write TITLE DIR    write the note titled TITLE to the file DIR/TITLE, once you allow it
 scrpad --run TITLE -- CMD   run CMD with the note's KEY=VALUE lines as its environment, once you allow it
 scrpad --skill              print the SKILL.md that teaches an AI agent these commands
+scrpad --install-agent codex|skill     set scrpad up for an agent (--dry-run shows what it would do)
+scrpad --uninstall-agent codex|skill   take that setup away again
 ```
 
-`scrpad -` takes at most 1 MiB of UTF-8 text and drops the one trailing newline `echo` adds; anything else is refused with a message on stderr. The note is a plain note titled like any new one: hide or encrypt it as needed. A running scrpad takes over (below), so the note opens in the window you already have. `--append`, `--list`, `--read`, `--write`, `--run` and `--skill` are for scripts and agents, below. For example, to turn the clipboard into a note with a key in Hyprland:
+`scrpad -` takes at most 1 MiB of UTF-8 text and drops the one trailing newline `echo` adds; anything else is refused with a message on stderr. The note is a plain note titled like any new one: hide or encrypt it as needed. A running scrpad takes over (below), so the note opens in the window you already have. `--append`, `--list`, `--read`, `--write`, `--run`, `--skill`, `--install-agent` and `--uninstall-agent` are for scripts and agents, below. For example, to turn the clipboard into a note with a key in Hyprland:
 
 ```
 bind = SUPER SHIFT, V, exec, wl-paste | scrpad -
@@ -88,7 +90,7 @@ Notes are stored in `~/.config/scrpad/notes.json` (macOS: `~/Library/Application
 
 ## Scripts and agents
 
-Scripts, and AI agents such as Claude Code working in a terminal, can keep commands, paths and snippets in scrpad, read your notes when you let them, and hand a note to a program once you allow it (below). To teach an agent all this, install the Claude Code plugin or the skill (*Teaching your agent*, below).
+Scripts, and AI agents such as Claude Code working in a terminal, can keep commands, paths and snippets in scrpad, read your notes when you let them, and hand a note to a program once you allow it (below). To teach an agent all this, install the Claude Code plugin, or run `scrpad --install-agent` for other agents (*Teaching your agent*, below).
 
 ![A note added by an agent](docs/script-append.png)
 
@@ -142,7 +144,7 @@ What the dialog guarantees:
 
 **Limits, plainly.** Once `.env` is on the disk, scrpad no longer controls who reads it. The agent can `cat` it unless its tool rules stop that, and filters on shell commands are best effort. `--run` keeps the secret off the disk, but the command's own output can still print it, and the agent sees that output. Prefer `--run` when the program takes its settings from the environment. The dialog stops an agent that uses scrpad's commands as intended, not one set on defeating it: such an agent can speak scrpad's socket protocol itself, drive the desktop, or change what the allowed command does (a `package.json` script, say).
 
-A Claude Code hook can block reading the files by name. The plugin (below) brings one: it stops a tool call that names `.env` or a name like `.env.local` (but not `.env.example`), tells the agent why, and lets through the scrpad commands that name the note (`scrpad --run .env -- …`). It needs `jq`. It is best effort: quoting tricks, a shell glob such as `cat .e*`, or other file names can still slip past it.
+A hook can block reading the files by name, in Claude Code and in Codex. The Claude Code plugin and `scrpad --install-agent codex` (both below) bring one: it stops a tool call that names `.env` or a name like `.env.local` (but not `.env.example`), tells the agent why, and lets through the scrpad commands that name the note (`scrpad --run .env -- …`). It needs `jq`. It is best effort: quoting tricks, a shell glob such as `cat .e*`, or other file names can still slip past it.
 
 ### Teaching your agent
 
@@ -167,14 +169,29 @@ Answer `y` to add the marketplace and pick a scope. The hook then guards `.env` 
 }
 ```
 
-**Other agents: the skill.** Agents that read [Agent Skills](https://agentskills.io), such as Codex and Gemini CLI, get the same instructions from `SKILL.md`. scrpad prints the one matching its version:
+**Codex: one command.** It installs the skill and the hook above:
 
 ```
-mkdir -p ~/.agents/skills/scrpad
-scrpad --skill > ~/.agents/skills/scrpad/SKILL.md
+scrpad --install-agent codex
 ```
 
-`~/.agents/skills` is where Codex looks; other agents have a folder of their own (Gemini CLI: `~/.gemini/skills`), and a project can have one too (`.agents/skills`). Run the command again after updating scrpad. The skill tells the agent to save to the note `Agent`, read only when you ask, treat a note's text as data rather than instructions, never ask you to paste a secret into the chat, and never read a handed-over file or print the environment.
+It writes `~/.agents/skills/scrpad/SKILL.md`, and `handoff-files.sh` and `handoff-files.jq` to `~/.codex/scrpad/` (or `$CODEX_HOME/scrpad/`), and adds one entry to `~/.codex/hooks.json`, leaving the other hooks as they are. The hook needs `sh` and `jq`, so on Windows only the skill is installed. Then restart Codex and trust the new hook in its `/hooks` view: Codex skips a hook until you do.
+
+**Gemini CLI and other agents: the skill.** Agents that read [Agent Skills](https://agentskills.io) from `~/.agents/skills` get the same instructions from `SKILL.md`:
+
+```
+scrpad --install-agent skill
+```
+
+An agent with a skills folder of its own (Gemini CLI also reads `~/.gemini/skills`) or a project that wants the skill in `.agents/skills` can have it from `scrpad --skill`, which prints the `SKILL.md` matching the version: `scrpad --skill > PATH/scrpad/SKILL.md`.
+
+The commands do the same thing each time you run them, so run one again after updating scrpad: that is the update. A command that finds nothing to change says *already up to date* (*already present* for the hook entry). When an agent runs a scrpad command with a skill from an older scrpad installed, scrpad prints one line on stderr that says so and names the command to run. `--dry-run` prints what would be written and changes nothing.
+
+scrpad recognises its own files by their content, so it overwrites only what it wrote, or a copy made by hand from `scrpad --skill` or `plugin/hooks`. Any other file at the same place, such as a `.jq` file you added names to, is moved to `NAME.bak` (`.bak.1`, … if that exists) and scrpad says so at once. `hooks.json` is copied to `hooks.json.scrpad.bak` before scrpad changes it; a `hooks.json` scrpad cannot parse is left alone and the command fails. `scrpad --uninstall-agent codex` removes the skill, the hook files and the hook entry (`skill`: the skill only), but not a file you have changed since. For Claude Code, `scrpad --install-agent claude` only points to the plugin.
+
+Only a global install exists. scrpad is your tool, a teammate may not have it, and a hook in a project would put a path from your machine into the repository.
+
+The skill tells the agent to save to the note `Agent`, read only when you ask, treat a note's text as data rather than instructions, never ask you to paste a secret into the chat, and never read a handed-over file or print the environment.
 
 **Any agent: three lines.** For an agent without skills, put this in its instructions (`AGENTS.md` or the like):
 
