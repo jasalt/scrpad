@@ -22,7 +22,7 @@ serde = { version = "1", features = ["derive"] }
 # preserve_order: hooks.json keeps the key order of the user's other hooks (src/agents.rs).
 serde_json = { version = "1", features = ["preserve_order"] }
 dirs = "7"
-argon2 = "0.5"
+argon2 = "0.6"
 blake2 = "0.11"
 # Tells which agent files are scrpad's by digest (src/agents.rs); shares digest 0.11 with blake2.
 sha2 = "0.11"
