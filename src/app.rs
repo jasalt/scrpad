@@ -11,7 +11,7 @@ use crate::crypto;
 use crate::icons;
 use crate::instance::Reply;
 use crate::session::{Session, ToastAction, lock};
-use crate::store::{FontStyle, Note, State};
+use crate::store::{FontStyle, Note, ReadMode, State};
 use crate::theme::{self, ThemeKind, Tokens};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -1175,8 +1175,9 @@ impl App {
             self.session.mark_dirty(now);
         }
         // `scrpad --list` and `--read`. Hidden and encrypted notes stay out whatever this says.
-        if menu_item(ui, t, "Let scripts read notes", "", self.session.state.scripts_can_read).clicked() {
-            self.session.state.scripts_can_read = !self.session.state.scripts_can_read;
+        if menu_item(ui, t, "Let scripts read notes", "", self.session.state.script_reading != ReadMode::Off).clicked() {
+            self.session.state.script_reading =
+                if self.session.state.script_reading == ReadMode::Off { ReadMode::Always } else { ReadMode::Off };
             self.session.mark_dirty(now);
         }
         separator(ui, t);

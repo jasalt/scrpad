@@ -20,6 +20,7 @@ pub use term::run;
 
 use crate::crypto;
 use crate::session::{Session, ToastAction, lock};
+use crate::store::ReadMode;
 use editor::{Editor, Move};
 
 /// The keys, as the help (F1) lists them and README.md documents them. Ctrl+Shift combinations
@@ -341,7 +342,11 @@ impl Tui {
             Action::Menu => self.modal = Some(Modal::Menu { selected: 0 }),
             Action::AutoLock => self.toggle_option(now, |s| &mut s.auto_lock),
             Action::AutoRehide => self.toggle_option(now, |s| &mut s.auto_rehide),
-            Action::ScriptsRead => self.toggle_option(now, |s| &mut s.scripts_can_read),
+            Action::ScriptsRead => {
+                let state = &mut self.session.state;
+                state.script_reading = if state.script_reading == ReadMode::Off { ReadMode::Always } else { ReadMode::Off };
+                self.session.mark_dirty(now);
+            }
             Action::Quit => {
                 // The launch asking gets a clear "denied", not "closed".
                 self.session.deny(now);
@@ -639,7 +644,7 @@ impl Tui {
         items.push(MenuItem::option("Lock encrypted notes automatically", Action::AutoLock, s.state.auto_lock));
         items.push(MenuItem::option("Hide notes again automatically", Action::AutoRehide, s.state.auto_rehide));
         // `scrpad --list` and `--read`. Hidden and encrypted notes stay out whatever this says.
-        items.push(MenuItem::option("Let scripts read notes", Action::ScriptsRead, s.state.scripts_can_read));
+        items.push(MenuItem::option("Let scripts read notes", Action::ScriptsRead, s.state.script_reading != ReadMode::Off));
         items.push(MenuItem::new("Keys", "F1", Action::Help));
         items.push(MenuItem::new("Quit", "Ctrl+Q", Action::Quit));
         if s.save_error.is_some() {

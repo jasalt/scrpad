@@ -46,8 +46,10 @@ Usage: scrpad [--tui] [--toggle | --new | - | --append TITLE TEXT | --list | --r
 
 A running scrpad takes over: it shows the window and adds the note. --append, --list and
 --read leave the window as it is, and work on the notes file when no scrpad runs.
---list and --read need \"Let scripts read notes\" in the … menu; hidden and encrypted
-notes are never listed or read, and --append refuses an encrypted note.
+--list and --read follow \"Let scripts read notes\" in the … menu. Off refuses both. Ask each
+time: --list works, and --read waits for you to allow it in a running scrpad. Always: no
+question; findings that look like instructions for an AI are printed on stderr. Hidden and
+encrypted notes are never listed or read, and --append refuses an encrypted note.
 --write and --run need a running scrpad (window or --tui) to ask you, every time.
 ";
 
@@ -138,6 +140,12 @@ impl Command {
     /// Carried out only once the user allows it in the running scrpad.
     pub fn needs_approval(&self) -> bool {
         matches!(self, Command::Write { .. } | Command::Run { .. })
+    }
+
+    /// May wait for the user: the two above, and `--read`, which waits when reading is set to
+    /// ask each time.
+    pub fn may_wait(&self) -> bool {
+        self.needs_approval() || matches!(self, Command::Read(_))
     }
 }
 
@@ -390,6 +398,9 @@ mod tests {
         let both = [Command::Write { title: "a".into(), dir: "/".into() }, Command::Run { title: "a".into(), argv: vec!["x".into()] }];
         assert!(both.iter().all(|c| c.is_script() && c.needs_approval()));
         assert!(![Command::List, append("a", "b")].iter().any(Command::needs_approval));
+        assert!(both.iter().all(Command::may_wait));
+        assert!(Command::Read("a".into()).may_wait() && !Command::Read("a".into()).needs_approval());
+        assert!(![Command::List, append("a", "b")].iter().any(Command::may_wait));
     }
 
     #[test]

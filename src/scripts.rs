@@ -1,6 +1,7 @@
 //! What scripts and AI agents may do with the notes: `scrpad --append`, `--list` and `--read`.
 //! Appending is always allowed and never replaces or removes anything. Reading is off until the
-//! user turns on “Let scripts read notes”, and never reaches a hidden or an encrypted note.
+//! user sets “Let scripts read notes” to ask each time or always, and never reaches a hidden or
+//! an encrypted note.
 //!
 //! The notes file is where scripts meet the notes. With no window running, `answer` loads it,
 //! changes it and saves it. A running window has the same done by the thread that answers its
@@ -12,9 +13,10 @@ use std::path::Path;
 
 use crate::cli::Command;
 use crate::instance::Reply;
-use crate::store::{Note, State};
+use crate::store::{Note, ReadMode, State};
 
 pub const NOBODY_TO_ASK: &str = "scrpad is not open to ask you; open it (the window, or scrpad --tui) and try again";
+pub const READING_ASKS: &str = "scrpad asks you before each read now; try again";
 pub const READING_OFF: &str = "reading notes is off; turn on “Let scripts read notes” in the … menu of scrpad";
 
 /// What a running window shares with the thread that answers scripts. The window holds the lock
@@ -26,7 +28,7 @@ pub struct Window {
     pub appends: Vec<(String, String)>,
     /// Where the window is ahead of its last save: the read option as it is now, and the notes
     /// (by id) hidden or encrypted now.
-    pub can_read: bool,
+    pub reading: ReadMode,
     pub hidden: HashSet<u64>,
     pub encrypted: HashSet<u64>,
     /// The encrypted notes unlocked now: only the window has their password, so an append to
@@ -39,7 +41,7 @@ pub struct Window {
 impl Window {
     /// Catches up with the window's notes and options.
     pub fn track(&mut self, state: &State) {
-        self.can_read = state.scripts_can_read;
+        self.reading = state.script_reading;
         self.hidden.clear();
         self.hidden.extend(state.notes.iter().filter(|n| n.hidden).map(|n| n.id));
         self.encrypted.clear();
@@ -67,6 +69,14 @@ fn carry_out(path: Option<&Path>, command: &Command, mut window: Option<&mut Win
         return Err("scrpad could not load its notes file and saves nothing until it is restarted".into());
     }
     let mut state = State::load(path).map_err(|e| e.to_string())?;
+    // A read that must be asked about is the running window's to answer.
+    if matches!(command, Command::Read(_)) {
+        match reading(&state, window.as_deref()) {
+            ReadMode::Ask if window.is_none() => return Err(NOBODY_TO_ASK.into()),
+            ReadMode::Ask => return Err(READING_ASKS.into()),
+            _ => {}
+        }
+    }
     match command {
         Command::Append { title, text } => {
             let target = state.notes.iter().find(|n| n.title == *title);
@@ -132,8 +142,20 @@ fn readable(note: &Note, window: Option<&Window>) -> bool {
     !note.hidden && !note.is_encrypted() && window.is_none_or(|w| !w.hidden.contains(&note.id) && !w.encrypted.contains(&note.id))
 }
 
+/// The reading option as it is now: the window's when one runs, else the notes file's.
+fn reading(state: &State, window: Option<&Window>) -> ReadMode {
+    window.map_or(state.script_reading, |w| w.reading)
+}
+
+/// Both `--list` and `--read` are refused with reading off.
 fn may_read(state: &State, window: Option<&Window>) -> Result<(), String> {
-    if window.map_or(state.scripts_can_read, |w| w.can_read) { Ok(()) } else { Err(READING_OFF.into()) }
+    if reading(state, window) == ReadMode::Off { Err(READING_OFF.into()) } else { Ok(()) }
+}
+
+/// Whether the running scrpad must ask the user before carrying out `command`: always for
+/// `--write` and `--run`, and for `--read` while reading is set to ask each time.
+pub fn asks(command: &Command, window: &Window) -> bool {
+    command.needs_approval() || matches!(command, Command::Read(_)) && window.reading == ReadMode::Ask
 }
 
 /// The titles of the readable notes, one per line, in tab order.
@@ -172,7 +194,7 @@ mod tests {
     }
 
     fn state(notes: Vec<Note>) -> State {
-        let mut s = State { notes, scripts_can_read: true, ..State::default() };
+        let mut s = State { notes, script_reading: ReadMode::Always, ..State::default() };
         s.fix_up();
         s
     }
@@ -267,20 +289,64 @@ mod tests {
     #[test]
     fn reading_is_refused_with_the_option_off() {
         let mut s = state(vec![note("Todo", "ship it")]);
-        s.scripts_can_read = false;
+        s.script_reading = ReadMode::Off;
         assert_eq!(list(&s, None).unwrap_err(), READING_OFF);
         assert_eq!(read(&s, "Todo", None).unwrap_err(), READING_OFF);
         assert!(READING_OFF.contains("Let scripts read notes"));
         // A running window's option as it is now wins over the last save.
         let mut window = Window::default();
         window.track(&s);
-        s.scripts_can_read = true;
+        s.script_reading = ReadMode::Always;
         assert_eq!(read(&s, "Todo", Some(&window)).unwrap_err(), READING_OFF);
-        window.can_read = true;
-        s.scripts_can_read = false;
+        window.reading = ReadMode::Always;
+        s.script_reading = ReadMode::Off;
         assert_eq!(read(&s, "Todo", Some(&window)).unwrap(), "ship it");
         // Appending needs no option.
         assert!(append(&mut s, "Todo", "more").is_ok());
+    }
+
+    #[test]
+    fn asking_lists_the_titles_and_leaves_reads_to_the_window() {
+        let (path, dir) = temp_notes("ask");
+        let mut s = state(vec![note("Todo", "ship it"), note("Key", "sk-live")]);
+        s.notes[1].hidden = true;
+        s.script_reading = ReadMode::Ask;
+        s.save(&path).unwrap();
+        let read_todo = Command::Read("Todo".into());
+        // No window: the list works, and nobody can ask about the read.
+        assert_eq!(answer(Some(&path), &Command::List, None), Reply::Text("Todo\n".into()));
+        assert_eq!(answer(Some(&path), &read_todo, None), Reply::Error(NOBODY_TO_ASK.into()));
+        // A window whose option is Ask answers the same; it asks before the script path is reached.
+        let mut window = Window::default();
+        window.track(&s);
+        assert_eq!(answer(Some(&path), &Command::List, Some(&mut window)), Reply::Text("Todo\n".into()));
+        assert!(asks(&read_todo, &window));
+        // Mode changed to Ask a moment ago, after the window decided not to ask.
+        window.reading = ReadMode::Ask;
+        assert_eq!(answer(Some(&path), &read_todo, Some(&mut window)), Reply::Error(READING_ASKS.into()));
+        // Off refuses both.
+        window.reading = ReadMode::Off;
+        assert_eq!(answer(Some(&path), &Command::List, Some(&mut window)), Reply::Error(READING_OFF.into()));
+        assert_eq!(answer(Some(&path), &read_todo, Some(&mut window)), Reply::Error(READING_OFF.into()));
+        s.script_reading = ReadMode::Off;
+        s.save(&path).unwrap();
+        assert_eq!(answer(Some(&path), &Command::List, None), Reply::Error(READING_OFF.into()));
+        assert_eq!(answer(Some(&path), &read_todo, None), Reply::Error(READING_OFF.into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn only_a_read_in_ask_mode_and_the_handoffs_are_asked_about() {
+        let mut window = Window::default();
+        let read = Command::Read("a".into());
+        let write = Command::Write { title: "a".into(), dir: "/".into() };
+        let run = Command::Run { title: "a".into(), argv: vec!["x".into()] };
+        for (mode, reads) in [(ReadMode::Off, false), (ReadMode::Ask, true), (ReadMode::Always, false)] {
+            window.reading = mode;
+            assert_eq!(asks(&read, &window), reads, "{mode:?}");
+            assert!(asks(&write, &window) && asks(&run, &window));
+            assert!(!asks(&Command::List, &window) && !asks(&append_cmd("a", "b"), &window));
+        }
     }
 
     #[test]
@@ -329,10 +395,10 @@ mod tests {
         let (path, dir) = temp_notes("read");
         let mut s = state(vec![note("Todo", "ship it"), note("Key", "sk-live")]);
         s.notes[1].hidden = true;
-        s.scripts_can_read = false;
+        s.script_reading = ReadMode::Off;
         s.save(&path).unwrap();
         assert_eq!(answer(Some(&path), &Command::List, None), Reply::Error(READING_OFF.into()));
-        s.scripts_can_read = true;
+        s.script_reading = ReadMode::Always;
         s.save(&path).unwrap();
         assert_eq!(answer(Some(&path), &Command::List, None), Reply::Text("Todo\n".into()));
         assert_eq!(answer(Some(&path), &Command::Read("Todo".into()), None), Reply::Text("ship it".into()));
