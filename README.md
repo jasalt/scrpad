@@ -175,7 +175,7 @@ Answer `y` to add the marketplace and pick a scope. The hook then guards `.env` 
 scrpad --install-agent codex
 ```
 
-It writes `~/.agents/skills/scrpad/SKILL.md`, and `handoff-files.sh` and `handoff-files.jq` to `~/.codex/scrpad/` (or `$CODEX_HOME/scrpad/`), and adds one entry to `~/.codex/hooks.json`, leaving the other hooks as they are. The hook needs `sh` and `jq`, so on Windows only the skill is installed. Then restart Codex and trust the new hook in its `/hooks` view: Codex skips a hook until you do.
+It writes `~/.agents/skills/scrpad/SKILL.md`, and `handoff-files.sh` and `handoff-files.jq` to `~/.codex/scrpad/` (or `$CODEX_HOME/scrpad/`), and adds one entry to `~/.codex/hooks.json`, leaving the other hooks as they are. The hook is installed when `sh` and `jq` are on `PATH` (on Windows, for example from Git for Windows' `usr\bin` or MSYS2); otherwise only the skill is, with a warning: run the command again once they are there. Then restart Codex and trust the new hook in its `/hooks` view: Codex skips a hook until you do.
 
 **Gemini CLI and other agents: the skill.** Agents that read [Agent Skills](https://agentskills.io) from `~/.agents/skills` get the same instructions from `SKILL.md`:
 

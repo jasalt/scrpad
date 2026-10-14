@@ -38,12 +38,14 @@ const MARKER_START: [&str; 2] = ["<!-- scrpad-owned", "# scrpad-owned"];
 /// The most of a file `inspect` reads: a bigger one is not ours.
 const MAX_FILE: u64 = 1 << 20;
 
-/// The two places the files go.
+/// The two places the files go, and how to tell which programs are installed.
 #[derive(Clone, Debug)]
 pub struct Dirs {
     pub home: PathBuf,
     /// `$CODEX_HOME`, `~/.codex` when unset. Always absolute: hooks do not expand `~`.
     pub codex_home: PathBuf,
+    /// Whether a program is on PATH; a parameter so the tests do not depend on the machine.
+    pub have: fn(&str) -> bool,
 }
 
 impl Dirs {
@@ -53,7 +55,7 @@ impl Dirs {
             Some(dir) => std::path::absolute(dir).map_err(|e| format!("CODEX_HOME: {e}"))?,
             None => home.join(".codex"),
         };
-        Ok(Self { home, codex_home })
+        Ok(Self { home, codex_home, have: on_path })
     }
 
     fn skill(&self) -> PathBuf {
@@ -74,7 +76,8 @@ pub fn run(target: AgentTarget, uninstall: bool, dry_run: bool) -> i32 {
     let result = Dirs::from_env().and_then(|dirs| {
         apply(&dirs, target, uninstall, dry_run, &mut |line| {
             // `| head`: a closed pipe is no reason to stop half way.
-            let _ = writeln!(std::io::stdout(), "{line}");
+            let _ =
+                if line.starts_with("warning:") { writeln!(std::io::stderr(), "{line}") } else { writeln!(std::io::stdout(), "{line}") };
         })
     });
     match result {
@@ -89,7 +92,7 @@ pub fn run(target: AgentTarget, uninstall: bool, dry_run: bool) -> i32 {
 /// Installs or removes what `target` needs, saying each step through `say` as it happens: a
 /// file moved aside is told at once, as a later step may fail.
 pub fn apply(dirs: &Dirs, target: AgentTarget, uninstall: bool, dry_run: bool, say: &mut dyn FnMut(&str)) -> Result<(), String> {
-    let mut job = Job { dry_run, say, touched: false };
+    let mut job = Job { dry_run, say, touched: false, hooked: false };
     let codex = target == AgentTarget::Codex;
     let result = match (target, uninstall) {
         (AgentTarget::Claude, _) => {
@@ -105,7 +108,7 @@ pub fn apply(dirs: &Dirs, target: AgentTarget, uninstall: bool, dry_run: bool, s
         (job.say)("Dry run: nothing was changed.");
     } else if uninstall && !job.touched {
         (job.say)("Nothing to remove: scrpad had put nothing there.");
-    } else if codex && !uninstall && cfg!(unix) {
+    } else if job.hooked {
         (job.say)("Restart Codex, then trust the new hook in /hooks: Codex skips a hook until you do.");
     }
     Ok(())
@@ -125,6 +128,8 @@ struct Job<'a> {
     say: &'a mut dyn FnMut(&str),
     /// Something was found to remove or leave.
     touched: bool,
+    /// The Codex hook is in place (installed, updated or already there).
+    hooked: bool,
 }
 
 impl Job<'_> {
@@ -141,22 +146,24 @@ impl Job<'_> {
         if target != AgentTarget::Codex {
             return Ok(());
         }
-        if !cfg!(unix) {
-            (self.say)("The .env guard hook needs sh and jq, so it is not installed on Windows.");
+        let missing: Vec<&str> = ["sh", "jq"].into_iter().filter(|tool| !(dirs.have)(tool)).collect();
+        if !missing.is_empty() {
+            let they = if missing.len() == 1 { "it" } else { "them" };
+            let what = missing.join(" and ");
+            let head = if self.dry_run { "would not install the .env guard hook" } else { "the .env guard hook was not installed" };
+            (self.say)(&format!("warning: {head}: it needs {what} on PATH. Install {they} and run scrpad --install-agent codex again."));
             return Ok(());
         }
         let hook_dir = dirs.hook_dir();
         self.put(&hook_dir.join("handoff-files.sh"), &with_marker(HOOK_SH, name, Place::AfterFirstLine), SH_DIGESTS)?;
         self.put(&hook_dir.join("handoff-files.jq"), &with_marker(HOOK_JQ, name, Place::First), JQ_DIGESTS)?;
         self.add_hook(&dirs.hooks_json(), &hook_dir.join("handoff-files.sh"))?;
-        if !on_path("jq") {
-            (self.say)("warning: jq is not on PATH: the hook lets every call through until jq is installed");
-        }
+        self.hooked = true;
         Ok(())
     }
 
     fn uninstall(&mut self, dirs: &Dirs, codex: bool) -> Result<(), String> {
-        if codex && cfg!(unix) {
+        if codex {
             self.remove_hook(&dirs.hooks_json())?;
             let hook_dir = dirs.hook_dir();
             self.take(&hook_dir.join("handoff-files.sh"), SH_DIGESTS)?;
@@ -231,10 +238,9 @@ impl Job<'_> {
     }
 
     fn add_hook(&mut self, hooks_json: &Path, script: &Path) -> Result<(), String> {
-        let command = format!("sh \"{}\"", script.display());
-        if command.contains(['\\', '$', '`']) || script.to_str().is_none_or(|s| s.contains('"')) {
+        let Some(command) = script.to_str().and_then(|s| hook_command(s, cfg!(windows))) else {
             return Err(format!("{} has a character a hook command cannot hold; set CODEX_HOME to another folder", script.display()));
-        }
+        };
         let wanted = json!({ "matcher": "Bash|apply_patch", "hooks": [{ "type": "command", "command": command }] });
         let existing = load_hooks(hooks_json)?;
         let existed = existing.is_some();
@@ -477,9 +483,26 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     sync_parent(path).map_err(fail)
 }
 
+/// The hook command for the script at `script`, or `None` if the path has a character the
+/// command cannot hold. On Windows `\` becomes `/`, which sh (Git Bash, MSYS2) reads and cmd
+/// and PowerShell pass on untouched.
+fn hook_command(script: &str, windows: bool) -> Option<String> {
+    let path = if windows { script.replace('\\', "/") } else { script.to_owned() };
+    (!path.contains(['"', '$', '`', '\\'])).then(|| format!("sh \"{path}\""))
+}
+
 fn on_path(program: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else { return false };
-    std::env::split_paths(&path).any(|dir| dir.join(program).is_file() || dir.join(format!("{program}.exe")).is_file())
+    // On Windows a program is found by any of the PATHEXT extensions (.exe, .cmd, ...).
+    let extensions: Vec<String> = if cfg!(windows) {
+        let pathext = std::env::var("PATHEXT").unwrap_or_default();
+        let listed = pathext.split(';').filter(|e| e.starts_with('.'));
+        [".exe", ".cmd", ".bat"].into_iter().chain(listed).map(str::to_lowercase).collect()
+    } else {
+        Vec::new()
+    };
+    std::env::split_paths(&path)
+        .any(|dir| dir.join(program).is_file() || extensions.iter().any(|e| dir.join(format!("{program}{e}")).is_file()))
 }
 
 /// A script command's one-line warning when the installed skill is from an older scrpad.
@@ -533,7 +556,12 @@ mod tests {
     /// A fake home with a fake `.codex`, and nothing in them.
     fn dirs(name: &str) -> Dirs {
         let home = temp_dir(name);
-        Dirs { codex_home: home.join(".codex"), home }
+        Dirs { codex_home: home.join(".codex"), home, have: |_| true }
+    }
+
+    /// Like `dirs`, with only the named programs on PATH.
+    fn dirs_with(name: &str, tools: fn(&str) -> bool) -> Dirs {
+        Dirs { have: tools, ..dirs(name) }
     }
 
     fn run_apply(dirs: &Dirs, target: AgentTarget, uninstall: bool, dry_run: bool) -> Result<Vec<String>, String> {
@@ -736,11 +764,9 @@ mod tests {
             let d = dirs("bad");
             put(&d.hooks_json(), bad);
             let error = run_apply(&d, AgentTarget::Codex, false, false);
-            if cfg!(unix) {
-                assert!(error.unwrap_err().contains("left it as it was"), "{bad}");
-                assert_eq!(read(&d.hooks_json()), bad);
-                assert!(!d.codex_home.join("hooks.json.scrpad.bak").exists());
-            }
+            assert!(error.unwrap_err().contains("left it as it was"), "{bad}");
+            assert_eq!(read(&d.hooks_json()), bad);
+            assert!(!d.codex_home.join("hooks.json.scrpad.bak").exists());
         }
     }
 
@@ -799,7 +825,7 @@ mod tests {
         install(&d, AgentTarget::Codex);
         run_apply(&d, AgentTarget::Skill, true, false).unwrap();
         assert!(!d.skill().exists());
-        assert!(d.hook_dir().join("handoff-files.sh").exists() == cfg!(unix));
+        assert!(d.hook_dir().join("handoff-files.sh").exists());
     }
 
     #[test]
@@ -896,6 +922,53 @@ mod tests {
         run_apply(&d, AgentTarget::Codex, true, false).unwrap();
         let gone: Value = serde_json::from_str(&read(&d.hooks_json())).unwrap();
         assert_eq!(gone["hooks"]["PreToolUse"][0]["hooks"], json!([{"type": "command", "command": "rtk hook"}]));
+    }
+
+    fn no_jq(program: &str) -> bool {
+        program != "jq"
+    }
+
+    #[test]
+    fn without_jq_only_the_skill_is_installed_and_the_warning_names_jq() {
+        let d = dirs_with("no jq", no_jq);
+        put(&d.hooks_json(), OTHERS);
+        let lines = install(&d, AgentTarget::Codex);
+        assert!(d.skill().exists());
+        assert!(!d.hook_dir().exists());
+        assert_eq!(read(&d.hooks_json()), OTHERS);
+        let warning = lines.iter().find(|l| l.starts_with("warning:")).expect("a warning");
+        assert!(warning.contains("not installed: it needs jq on PATH"), "{warning}");
+        assert!(lines.iter().all(|l| !l.contains("Restart Codex")), "{lines:?}");
+        let lines = run_apply(&d, AgentTarget::Codex, false, true).unwrap();
+        assert!(lines.iter().any(|l| l.starts_with("warning: would not install") && l.contains("needs jq ")), "{lines:?}");
+        let d = dirs_with("no tools", |_| false);
+        let lines = install(&d, AgentTarget::Codex);
+        assert!(lines.iter().any(|l| l.contains("needs sh and jq on PATH. Install them")), "{lines:?}");
+    }
+
+    #[test]
+    fn with_sh_and_jq_the_hook_is_installed() {
+        let d = dirs("both");
+        let lines = install(&d, AgentTarget::Codex);
+        assert!(d.hook_dir().join("handoff-files.sh").exists() && d.hooks_json().exists());
+        assert!(lines.iter().all(|l| !l.starts_with("warning:")), "{lines:?}");
+        assert!(lines.last().unwrap().starts_with("Restart Codex"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_windows_path_gets_forward_slashes() {
+        assert_eq!(
+            hook_command(r"C:\Users\me\.codex\scrpad\handoff-files.sh", true).unwrap(),
+            r#"sh "C:/Users/me/.codex/scrpad/handoff-files.sh""#
+        );
+        assert_eq!(
+            hook_command("/home/me/.codex/scrpad/handoff-files.sh", false).unwrap(),
+            r#"sh "/home/me/.codex/scrpad/handoff-files.sh""#
+        );
+        assert!(hook_command(r"/home/me\x/handoff-files.sh", false).is_none());
+        for bad in ["a\"b", "a$b", "a`b"] {
+            assert!(hook_command(bad, true).is_none() && hook_command(bad, false).is_none(), "{bad}");
+        }
     }
 
     #[cfg(unix)]
