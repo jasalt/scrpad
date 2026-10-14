@@ -2,15 +2,34 @@
 
 [![CI](https://github.com/mhavo/scrpad/actions/workflows/ci.yml/badge.svg)](https://github.com/mhavo/scrpad/actions/workflows/ci.yml)
 
-A tiny scratchpad: a small, frameless, floating notepad. The window holds only the essentials: multiple notes in tabs, hiding a note from prying eyes (API keys and the like), password encryption, copy to clipboard, save to file, and an "always on top" pin. Everything is saved automatically.
+A small, frameless, floating scratchpad for the things you need to jot down for a moment: a command to remember, an IP address, an API key, today's to-do list. Notes sit in tabs and save themselves, and a secret can be hidden on screen or encrypted with a password. It is also a shared notepad between you and an AI agent: the agent writes down what it finds and what it needs from you as it works, you answer in the note when you have time, and the agent reads your answers back.
 
-![Scratchpad](docs/screenshot.png)
+![scrpad with a note open, a hidden .env note, a locked Passwords note and a note from an agent](docs/screenshot.png)
+
+**Why another notes app?**
+
+1. **Somewhere to put things down, right now.** There is always something to keep for a moment: a command, an address, a key, a list. scrpad is one small window, a single native binary that starts at once, pinned on top when you want it and shown or hidden with one key. No folders, no accounts, no sync, and no network unless you ask for it: everything saves by itself to one local file.
+2. **Secrets have a place.** Hide a note against shoulder surfing and screen sharing, or encrypt it with a password (Argon2id and AES-256-GCM, compatible with SimpleTextCrypt). An encrypted note reaches the disk only encrypted, it locks itself when you step away, and a copied secret is cleared from the clipboard 30 seconds later.
+3. **Work together with your AI agent.** Claude Code, Codex and other agents can add to a note while they work: findings, data, questions, decisions they need from you. You go through the note at your own pace and write your answers in it, and when you tell the agent to, it reads the note back as your input. A note like `Agent: refactor` becomes a rolling handoff: the agent writes down where it is and what it needs, you add your decisions, and the next step (or the next session) picks up from there. Handing a secret over is one more use: `scrpad --run .env -- npm run dev` gives a key to the program but never to the chat. Reading is off until you turn it on, scrpad can ask you before each read, it asks before every handoff of a secret, and it warns when a note looks like it holds instructions aimed at an AI.
+
+**Features**
+
+- Notes in tabs: rename, drag to reorder, close and undo; autosave, atomic and private to you
+- Hide (eye) and encrypt (lock), with automatic locking and hiding again when idle or hidden
+- The window kept out of screenshots and screen sharing while a secret is open (Windows, macOS, Hyprland)
+- Always on top, one key to show and hide (`scrpad --toggle`), Hyprland support
+- Dark and light theme, Inter or JetBrains Mono
+- The same notes in a terminal (`scrpad --tui`), over SSH or without a desktop
+- Commands for scripts and agents: `scrpad -`, `--append`, `--read`, `--write`, `--run`, and a skill and hook for Claude Code and Codex
+- Linux, macOS and Windows; one executable, nothing to install
 
 | Light theme | Encrypting a note | Locked note |
 |---|---|---|
 | ![Light theme](docs/light.png) | ![Encrypt popup](docs/encrypt.png) | ![Locked note](docs/locked.png) |
 
 ## Download
+
+**Let your agent install it.** Tell Claude Code, Codex or another AI agent: *Read https://raw.githubusercontent.com/mhavo/scrpad/main/INSTALL.md and follow it.* It downloads the latest release, checks its checksum, installs it and sets scrpad up for itself, then tells you what is left for you to do.
 
 Prebuilt binaries for Linux (x86_64, aarch64), macOS (universal app for Apple Silicon and Intel) and Windows (x86_64) are on the [Releases](https://github.com/mhavo/scrpad/releases) page. Each archive holds a single executable (on macOS, an app bundle; on Windows, `scrpad.exe` and its console twin `scrpad.com`); there is nothing to install. `SHA256SUMS` lists the checksums.
 
@@ -330,7 +349,7 @@ cargo test            # just the unit tests + headless UI tests, images go to sh
 
 Rust is pinned in `rust-toolchain.toml`; the other tools (just, cargo-deny, typos, shfmt, shellcheck, actionlint, zizmor, gitleaks, jq) in `mise.toml`. The pre-commit hook runs the fast subset (`just pre-commit`: formatting, typos, gitleaks on the staged changes).
 
-The README images in `docs/` are copies of `shots/dark.png` (as `screenshot.png`), `light.png`, `encrypt-popup.png` (as `encrypt.png`), `locked.png`, `approval.png`, `approval-run.png`, `approval-read.png` and `script-append.png`. Refresh them after visual changes.
+The README images in `docs/` are copies of `shots/hero.png` (as `screenshot.png`), `light.png`, `encrypt-popup.png` (as `encrypt.png`), `locked.png`, `approval.png`, `approval-run.png`, `approval-read.png` and `script-append.png`. Refresh them after visual changes.
 
 `tests/plugin.rs` checks the Claude Code plugin: its manifests, the skill's front matter, and the hook run on sample tool calls (with jq, pinned in `mise.toml`). `claude plugin validate .` checks the marketplace and the plugin as Claude Code reads them.
 
