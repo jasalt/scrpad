@@ -343,8 +343,7 @@ impl Tui {
             Action::AutoLock => self.toggle_option(now, |s| &mut s.auto_lock),
             Action::AutoRehide => self.toggle_option(now, |s| &mut s.auto_rehide),
             Action::ScriptsRead(mode) => {
-                self.session.state.script_reading = mode;
-                self.session.mark_dirty(now);
+                self.session.set_reading(mode, now);
             }
             Action::Quit => {
                 // The launch asking gets a clear "denied", not "closed".
@@ -933,28 +932,34 @@ impl Tui {
                     }
                     Ask::Read { title, text, findings, .. } => {
                         lines.extend(wrap(&format!("Let the agent read “{title}”?"), Style::new().add_modifier(Modifier::BOLD)));
-                        lines.extend(wrap("It may take this text as your instructions.", Style::new()));
+                        let size = crate::session::size_label(text.len());
+                        lines.extend(wrap(&format!("{size}. It may take this text as your instructions."), Style::new()));
                         lines.push(Line::raw(""));
                         // Hidden characters shown escaped; a few lines, the rest only counted.
                         let (shown, _) = crate::scan::shown_text(text, 400, 32 << 10);
-                        let mut preview: Vec<&str> = Vec::new();
-                        let mut left = 0;
+                        let mut rows = 0;
+                        let mut started = 0;
                         for (n, line) in shown.lines().enumerate() {
                             for part in editor::wrap(line, inner_w.saturating_sub(5)) {
-                                if preview.len() < 6 {
+                                if rows < 6 {
                                     let flagged = findings.iter().any(|f| f.line == n + 1);
                                     lines.push(Line::from(vec![
                                         Span::styled(format!("{:>3} ", n + 1), style::MUTED),
                                         Span::styled(part.to_owned(), if flagged { style::ERROR } else { Style::new() }),
                                     ]));
-                                    preview.push(part);
-                                } else {
-                                    left += 1;
+                                    rows += 1;
+                                    started = n + 1;
                                 }
                             }
                         }
-                        if left > 0 {
-                            lines.extend(wrap(&format!("… {left} more lines"), style::MUTED));
+                        // What the agent gets beyond the lines shown, however far the preview cut.
+                        let total = text.lines().count();
+                        let left = crate::scan::LeftOut {
+                            lines: total.saturating_sub(started),
+                            bytes: text.split_inclusive('\n').skip(started).map(str::len).sum(),
+                        };
+                        if left.lines > 0 {
+                            lines.extend(wrap(&crate::session::left_out_line(left), style::MUTED));
                         }
                         if !findings.is_empty() {
                             lines.push(Line::raw(""));

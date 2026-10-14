@@ -1196,8 +1196,7 @@ impl App {
         ui.label(egui::RichText::new("Let scripts read notes").font(theme::regular(12.0)).color(t.text_muted));
         for mode in [ReadMode::Off, ReadMode::Ask, ReadMode::Always] {
             if menu_item(ui, t, mode.label(), "", self.session.state.script_reading == mode).clicked() {
-                self.session.state.script_reading = mode;
-                self.session.mark_dirty(now);
+                self.session.set_reading(mode, now);
             }
         }
         separator(ui, t);
@@ -1476,7 +1475,10 @@ impl App {
                 }
                 Ask::Read { title, text, findings, .. } => {
                     ui.label(egui::RichText::new(format!("Let the agent read “{title}”?")).font(theme::semibold(14.0)).color(t.text));
-                    ui.label(note("It may take this text as your instructions.", t.text_muted));
+                    ui.label(note(
+                        &format!("{} · it may take this text as your instructions.", crate::session::size_label(text.len())),
+                        t.text_muted,
+                    ));
                     read_preview(ui, t, text, findings);
                     if !findings.is_empty() {
                         egui::Frame::new()
@@ -1552,7 +1554,7 @@ impl App {
 /// The note's text as the agent would get it, with line numbers; hidden characters shown
 /// escaped and flagged lines in the error colour.
 fn read_preview(ui: &mut egui::Ui, t: &Tokens, text: &str, findings: &[crate::scan::Finding]) {
-    let (shown, left_out) = crate::scan::shown_text(text, 400, 32 << 10);
+    let (shown, left) = crate::scan::shown_text(text, 400, 32 << 10);
     let font = egui::FontId::monospace(12.0);
     let mut job = egui::text::LayoutJob::default();
     job.wrap.max_width = ui.available_width() - 24.0;
@@ -1564,8 +1566,8 @@ fn read_preview(ui: &mut egui::Ui, t: &Tokens, text: &str, findings: &[crate::sc
         job.append(line, 0.0, format(if flagged { t.error } else { t.text }));
         job.append("\n", 0.0, format(t.text));
     }
-    if left_out > 0 {
-        job.append(&format!("… {left_out} more lines"), 0.0, format(t.text_muted));
+    if left.lines > 0 || left.bytes > 0 {
+        job.append(&crate::session::left_out_line(left), 0.0, format(t.text_muted));
     }
     egui::Frame::new().fill(t.bg_bottom).corner_radius(6).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
         ui.set_width(ui.available_width());

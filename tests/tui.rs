@@ -412,3 +412,30 @@ fn a_note_with_findings_is_marked() {
     assert!(tabs.contains("plan [!]"), "{screen}");
     assert!(screen.lines().last().unwrap().contains("[!] line 2: asks to ignore earlier instructions"), "{screen}");
 }
+
+#[test]
+fn a_read_of_a_big_note_says_how_much_the_agent_gets() {
+    let text: String = (1..=10_000).map(|i| format!("line number {i}\n")).collect();
+    let mut state = State { notes: vec![Note::new("big".into())], ..State::default() };
+    state.notes[0].text = text.clone();
+    state.script_reading = ReadMode::Ask;
+    let mut s = Screen::sized(state, None, 100, 30);
+    let server = s.tui.session.approval_server();
+    let job = std::thread::spawn(move || server(&scrpad::cli::Command::Read("big".into())));
+    for _ in 0..200 {
+        s.tui.tick(s.now);
+        if s.tui.session.approval.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let screen = s.text();
+    // The dialog wraps its lines: look at the words only.
+    let words =
+        screen.lines().filter_map(|l| l.split('│').nth(1)).collect::<Vec<_>>().join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(words.contains("… and 9,994 more lines (165 KiB) not shown — the agent gets all of it"), "{screen}");
+    assert!(words.contains("165 KiB. It may take"), "{screen}");
+    s.now += 1.0;
+    s.press(KeyCode::Char('n'));
+    assert!(matches!(job.join().unwrap(), scrpad::instance::Reply::Error(_)));
+}

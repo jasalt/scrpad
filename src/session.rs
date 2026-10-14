@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::Duration;
 
 use blake2::{Blake2s256, Digest};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto;
 use crate::handoff;
@@ -94,6 +94,34 @@ pub enum Ask {
     /// the rest empty; the window fills in the note it found, the copy of its text taken now
     /// (which the agent gets, so it is what the user saw) and what the scan found in it.
     Read { title: String, note: u64, text: String, findings: Vec<scan::Finding> },
+}
+
+/// `n` with thousands separators: 9,994.
+fn grouped(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A size for the read dialog: `812 bytes`, `980 KiB`, `1.5 MiB`.
+pub fn size_label(bytes: usize) -> String {
+    match bytes {
+        0..1024 => format!("{} byte{}", bytes, if bytes == 1 { "" } else { "s" }),
+        1024..1_048_576 => format!("{} KiB", bytes.div_ceil(1024)),
+        _ => format!("{:.1} MiB", bytes as f64 / 1_048_576.0),
+    }
+}
+
+/// The line under a read preview that was cut: what the agent gets and the user does not see.
+pub fn left_out_line(left: scan::LeftOut) -> String {
+    let lines = if left.lines == 1 { "1 more line".to_owned() } else { format!("{} more lines", grouped(left.lines)) };
+    format!("… and {lines} ({}) not shown — the agent gets all of it", size_label(left.bytes))
 }
 
 impl Ask {
@@ -446,10 +474,16 @@ impl Session {
             if let Some(now) = now
                 && self.toast.as_ref().is_none_or(|t| t.action.is_none())
             {
-                if scan::scan(&text).is_empty() {
-                    self.toast(now, format!("Added to “{title}”"), None);
+                // The note as it is now: a finding from before the append counts too.
+                let flagged = self.state.notes.iter().find(|n| n.title == title).is_some_and(|n| !scan::scan(&n.text).is_empty());
+                if flagged {
+                    self.toast(
+                        now,
+                        format!("Added to “{title}”, which may hold instructions for an AI (see the warning on its tab)"),
+                        None,
+                    );
                 } else {
-                    self.toast(now, format!("Added to “{title}”: it may hold instructions for an AI (see the warning on its tab)"), None);
+                    self.toast(now, format!("Added to “{title}”"), None);
                 }
             }
         }
@@ -676,6 +710,7 @@ impl Session {
         let note = self.state.notes[i].clone();
         self.state.close_note(i);
         self.forget.push(note.id);
+        self.drop_unreadable_read(Some(now));
         if !note.text.is_empty() || note.is_encrypted() {
             let msg = format!("Closed “{}”", note.title);
             self.toast(now, msg, Some(Undo::Closed { index: i, note }));
@@ -692,7 +727,41 @@ impl Session {
         } else {
             self.revealed.insert(id);
         }
+        self.drop_unreadable_read(Some(now));
         self.mark_dirty(now);
+    }
+
+    /// Sets who may read notes by script, effective for scripts at once, not at the next save.
+    pub fn set_reading(&mut self, mode: ReadMode, now: f64) {
+        self.state.script_reading = mode;
+        lock(&self.scripts).track(&self.state);
+        self.drop_unreadable_read(Some(now));
+        self.mark_dirty(now);
+    }
+
+    /// Answers the open `--read` question at once, and drops its copy of the text, when the
+    /// note it is about can no longer be read by scripts (locked, encrypted, hidden, closed) or
+    /// reading was turned off. `now` is for the toast; `None` where the caller has no clock.
+    fn drop_unreadable_read(&mut self, now: Option<f64>) {
+        let Some(Approval { ask: Ask::Read { note, .. }, .. }) = &self.approval else { return };
+        let readable = self.state.script_reading != ReadMode::Off
+            && self.state.notes.iter().find(|n| n.id == *note).is_some_and(|n| scripts::readable(n, None));
+        if readable {
+            return;
+        }
+        let mut a = self.approval.take().expect("checked");
+        let title = a.ask.title().to_owned();
+        if let Ask::Read { text, .. } = &mut a.ask {
+            text.zeroize();
+        }
+        if a.settled.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let message = format!("“{title}” is no longer readable");
+        let _ = a.reply.send(Reply::Error(message.clone()));
+        if let Some(now) = now {
+            self.toast(now, message, None);
+        }
     }
 
     /// Whether the open note is hidden (revealed or not) or encrypted: the window is then kept
@@ -772,6 +841,7 @@ impl Session {
         self.epoch += 1;
         let (id, hash) = (note.id, text_hash(&note.text));
         self.sealed.insert(id, hash);
+        self.drop_unreadable_read(Some(now));
         // Write the cipher over the plaintext the file held until now.
         if self.save_now() {
             self.toast(now, "Encrypted: saved only encrypted from now on", None);
@@ -846,6 +916,7 @@ impl Session {
             self.write_with(&mut window);
         }
         window.track(&self.state);
+        self.drop_unreadable_read(None);
         locked
     }
 
@@ -1438,6 +1509,57 @@ mod tests {
     }
 
     #[test]
+    fn setting_the_reading_mode_reaches_scripts_at_once() {
+        let dir = std::env::temp_dir().join(format!("scrpad-set-reading-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = State { notes: vec![note("plan", "text")], script_reading: ReadMode::Always, ..State::default() };
+        let mut s = Session::new(state, Some(dir.join("notes.json")), None, Arc::new(|_| {}));
+        assert!(s.save_now());
+        let shared = s.scripts.clone();
+        super::lock(&shared).track(&s.state);
+        let read = Command::Read("plan".into());
+        let asks = s.asks();
+        let serve = s.script_server();
+        assert!(!asks(&read));
+        assert_eq!(serve(&read), Reply::Text("text".into()));
+        s.set_reading(ReadMode::Ask, 1.0);
+        assert!(asks(&read), "asks before any save");
+        assert!(matches!(serve(&read), Reply::Error(_)), "not served unasked");
+        s.set_reading(ReadMode::Off, 2.0);
+        assert!(!asks(&read) && matches!(serve(&read), Reply::Error(_)));
+        assert!(s.dirty_since.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pending_read_is_dropped_when_its_note_stops_being_readable() {
+        for change in 0..5 {
+            let mut s = asking(vec![note("plan", "text"), note("other", "")]);
+            let job = ask_and_wait(&s, Command::Read("plan".into()));
+            wait_for_approval(&mut s, 1.0);
+            match change {
+                0 => {
+                    s.state.active = 0;
+                    s.toggle_hidden(2.0);
+                }
+                1 => {
+                    s.state.active = 0;
+                    s.encrypt_note("pw", 2.0).unwrap();
+                }
+                2 => s.close_note(0, 2.0),
+                3 => s.set_reading(ReadMode::Off, 2.0),
+                _ => {
+                    s.state.notes[0].hidden = true;
+                    s.lock_all();
+                }
+            }
+            assert!(s.approval.is_none(), "change {change} left the dialog open");
+            let Reply::Error(e) = job.join().unwrap() else { panic!() };
+            assert_eq!(e, "“plan” is no longer readable");
+        }
+    }
+
+    #[test]
     fn asks_follows_the_reading_mode() {
         let mut s = asking(vec![note("plan", "text")]);
         let asks = s.asks();
@@ -1448,6 +1570,13 @@ mod tests {
         let shared = s.scripts.clone();
         super::lock(&shared).track(&s.state);
         assert!(!asks(&read));
+    }
+
+    #[test]
+    fn the_cut_line_says_what_the_agent_still_gets() {
+        let left = crate::scan::LeftOut { lines: 9_994, bytes: 980 * 1024 };
+        assert_eq!(super::left_out_line(left), "… and 9,994 more lines (980 KiB) not shown — the agent gets all of it");
+        assert!(super::left_out_line(crate::scan::LeftOut { lines: 1, bytes: 40 }).starts_with("… and 1 more line (40 bytes)"));
     }
 
     #[test]
@@ -1468,7 +1597,12 @@ mod tests {
         assert!(toast.contains("may hold instructions for an AI") && !toast.contains("disregard"), "{toast}");
         super::lock(&shared).appends.push(("plan".into(), "plain".into()));
         s.take_appends(&mut super::lock(&shared), Some(2.0));
-        assert_eq!(s.toast.as_ref().unwrap().text, "Added to “plan”");
+        // The note has findings after the append, so the toast says so even for plain text.
+        let toast = s.toast.as_ref().unwrap().text.clone();
+        assert!(toast.contains("may hold instructions for an AI") && !toast.contains("plain"), "{toast}");
+        super::lock(&shared).appends.push(("clean".into(), "plain".into()));
+        s.take_appends(&mut super::lock(&shared), Some(2.5));
+        assert_eq!(s.toast.as_ref().unwrap().text, "Added to “clean”");
         // Locked: no entry.
         s.state.notes[1].encrypt("pw").unwrap();
         s.state.active = 1;

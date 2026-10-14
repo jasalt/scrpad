@@ -821,6 +821,32 @@ fn a_read_request_shows_the_text_and_findings() {
 }
 
 #[test]
+fn a_read_of_one_huge_line_says_how_much_the_agent_gets() {
+    let _guard = ui_test_guard();
+    let mut state = sample();
+    state.notes[1].title = "Big".into();
+    state.notes[1].text = "x".repeat(100 << 10);
+    state.script_reading = ReadMode::Ask;
+    let mut h = harness(state);
+    let server = h.state().session.approval_server();
+    let job = std::thread::spawn(move || server(&scrpad::cli::Command::Read("Big".into())));
+    for _ in 0..100 {
+        h.run_steps(1);
+        if h.state().session.approval.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    h.run_steps(2);
+    h.get_by_label_contains("100 KiB");
+    h.get_by_label_contains("1 more line (68 KiB) not shown");
+    h.get_by_label_contains("the agent gets all of it");
+    h.state_mut().session.deny(1.0);
+    h.run_steps(2);
+    assert!(matches!(job.join().unwrap(), scrpad::instance::Reply::Error(_)));
+}
+
+#[test]
 fn a_tab_with_findings_shows_a_marker() {
     let _guard = ui_test_guard();
     let dir = temp_dir("findings-marker");

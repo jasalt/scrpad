@@ -138,10 +138,17 @@ fn group_text((kind, lines): &(Kind, Vec<usize>)) -> String {
     format!("{} ({noun} {at})", kind.label())
 }
 
+/// What a preview cut left out of the text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LeftOut {
+    pub lines: usize,
+    pub bytes: usize,
+}
+
 /// `text` for a preview: newlines and tabs kept, every hidden character as `\x1b` or
 /// `\u{200b}`, cut after `max_lines` lines or `max_bytes` bytes (at a character boundary),
-/// whichever comes first. Also returns how many lines the cut left out.
-pub fn shown_text(text: &str, max_lines: usize, max_bytes: usize) -> (String, usize) {
+/// whichever comes first. Also returns what the cut left out, in lines and bytes of `text`.
+pub fn shown_text(text: &str, max_lines: usize, max_bytes: usize) -> (String, LeftOut) {
     let mut out = String::new();
     let mut newlines = 0;
     for (at, c) in text.char_indices() {
@@ -164,11 +171,12 @@ pub fn shown_text(text: &str, max_lines: usize, max_bytes: usize) -> (String, us
             break;
         }
     }
-    (out, 0)
+    (out, LeftOut::default())
 }
 
-fn left_out(rest: &str) -> usize {
-    rest.strip_prefix('\n').unwrap_or(rest).lines().count()
+fn left_out(rest: &str) -> LeftOut {
+    let rest = rest.strip_prefix('\n').unwrap_or(rest);
+    LeftOut { lines: rest.lines().count(), bytes: rest.len() }
 }
 
 /// Lines split on `\n` only, so numbers match what the editor shows; a `\r` before it is
@@ -606,14 +614,14 @@ mod tests {
     fn shown_text_escapes_and_cuts() {
         let (shown, left) = shown_text("a\u{202e}b\u{1b}[0m\nc\td", 10, 1000);
         assert_eq!(shown, "a\\u{202e}b\\x1b[0m\nc\td");
-        assert_eq!(left, 0);
+        assert_eq!(left, LeftOut::default());
         let (shown, left) = shown_text("1\n2\n3\n4\n5\n", 2, 1000);
-        assert_eq!((shown.as_str(), left), ("1\n2", 3));
+        assert_eq!((shown.as_str(), left), ("1\n2", LeftOut { lines: 3, bytes: 6 }));
         let (shown, left) = shown_text("abc\ndef", 10, 5);
-        assert_eq!((shown.as_str(), left), ("abc\nd", 1));
+        assert_eq!((shown.as_str(), left), ("abc\nd", LeftOut { lines: 1, bytes: 2 }));
         let (shown, _) = shown_text("\u{e9}\u{e9}\u{e9}", 10, 3);
         assert_eq!(shown, "\u{e9}");
-        assert_eq!(shown_text("", 3, 10), (String::new(), 0));
+        assert_eq!(shown_text("", 3, 10), (String::new(), LeftOut::default()));
     }
 
     #[test]
