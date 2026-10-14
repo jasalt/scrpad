@@ -1450,6 +1450,10 @@ impl App {
                     ui.label(egui::RichText::new(crate::handoff::shown_command(argv)).font(font).color(t.text_muted));
                     ui.label(note("Its KEY=VALUE lines become the command's environment.", t.text_muted));
                 }
+                // Placeholder until the read dialog (title, text, findings) is drawn.
+                Ask::Read { title, .. } => {
+                    ui.label(egui::RichText::new(format!("Let the agent read “{title}”?")).font(theme::semibold(14.0)).color(t.text));
+                }
             }
             if needs_password {
                 ui.add_space(4.0);

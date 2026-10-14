@@ -138,7 +138,7 @@ pub fn append(state: &mut State, title: &str, text: &str) -> Result<(), String> 
 }
 
 /// Scripts never read a hidden or an encrypted note, whatever the option says.
-fn readable(note: &Note, window: Option<&Window>) -> bool {
+pub(crate) fn readable(note: &Note, window: Option<&Window>) -> bool {
     !note.hidden && !note.is_encrypted() && window.is_none_or(|w| !w.hidden.contains(&note.id) && !w.encrypted.contains(&note.id))
 }
 

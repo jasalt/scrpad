@@ -916,6 +916,10 @@ impl Tui {
                         lines.extend(wrap(&crate::handoff::shown_command(argv), style::MUTED));
                         lines.extend(wrap("Its KEY=VALUE lines become the command's environment.", style::MUTED));
                     }
+                    // Placeholder until the read dialog (title, text, findings) is drawn.
+                    Ask::Read { title, .. } => {
+                        lines.extend(wrap(&format!("Let the agent read “{title}”?"), Style::new().add_modifier(Modifier::BOLD)));
+                    }
                 }
                 let needs = self.session.approval_needs_password();
                 if needs {
