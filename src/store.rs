@@ -1,5 +1,6 @@
 //! The notes and window preferences, saved as JSON in the user's config directory.
 
+use std::ffi::{OsStr, OsString};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -383,12 +384,17 @@ impl Drop for PendingTemp {
     }
 }
 
+/// A name for a temp file next to the file `name`, unused by this process before.
+pub(crate) fn temp_name(name: &OsStr) -> OsString {
+    let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let mut name = name.to_os_string();
+    name.push(format!(".tmp.{}.{sequence}", std::process::id()));
+    name
+}
+
 pub(crate) fn create_unique_temp(path: &Path) -> std::io::Result<PendingTemp> {
     loop {
-        let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let mut name = path.file_name().unwrap_or_default().to_os_string();
-        name.push(format!(".tmp.{}.{sequence}", std::process::id()));
-        let candidate = path.with_file_name(name);
+        let candidate = path.with_file_name(temp_name(path.file_name().unwrap_or_default()));
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -415,7 +421,7 @@ pub(crate) fn sync_parent(path: &Path) -> std::io::Result<()> {
 /// The rename already happened: a file system that cannot fsync a directory (some FUSE and
 /// network mounts) must not make every save look failed.
 #[cfg(unix)]
-fn ignore_unsupported_sync(result: std::io::Result<()>) -> std::io::Result<()> {
+pub(crate) fn ignore_unsupported_sync(result: std::io::Result<()>) -> std::io::Result<()> {
     match result {
         Err(e) if matches!(e.kind(), std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput) => Ok(()),
         result => result,

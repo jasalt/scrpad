@@ -164,7 +164,7 @@ What the dialog guarantees:
 - **You are asked every time.** Nothing is remembered: no "always allow", no list of trusted folders. A request is answered once, and a request the asking command has already given up on (it waits about 2 minutes) is never shown or carried out. Answer while it waits. In the terminal UI, `y` allows and `n` or Esc denies; for a locked note, type the password and press Enter to allow; Esc denies.
 - **You see what happens**: the path of the file for `--write`, the command line for `--run`, each argument quoted as a shell would need it, with control and direction-changing characters shown as escapes. In the window, only a mouse click on its button allows a request, never a key; the buttons and Esc wait a moment after the dialog opens, so typing ahead cannot answer it.
 - **A locked note asks for its password in the dialog** and stays locked afterwards.
-- **A link in place of the file is refused.** A link in the folder path is resolved, and the dialog shows the real path.
+- **A link in place of the file is refused.** A link in the folder path is resolved, and the dialog shows the real path. scrpad opens that folder when it asks and writes into it; if the path no longer leads there when you click (a folder moved, a link put in its place), it refuses.
 - **An existing file is replaced only on "Replace".** The dialog says so when the file is there.
 - **A warning appears when git would commit the file**, that is, when git does not ignore it.
 - **The file is private and written atomically**: mode 0600 (owner only), and never half written.

@@ -915,7 +915,7 @@ impl Tui {
                     editor::wrap(text, inner_w).into_iter().map(|l| Line::styled(l.to_owned(), style)).collect()
                 };
                 match &approval.ask {
-                    Ask::Write { title, path, exists, git_ignored } => {
+                    Ask::Write { title, target: crate::handoff::Target { path, exists, .. }, git_ignored } => {
                         lines.extend(wrap(&format!("Write “{title}” to a file?"), Style::new().add_modifier(Modifier::BOLD)));
                         lines.extend(wrap(&path.display().to_string(), style::MUTED));
                         if *exists {

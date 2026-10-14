@@ -3587,6 +3587,7 @@ dependencies = [
  "interprocess",
  "ratatui",
  "rfd",
+ "rustix 1.1.5",
  "semver",
  "serde",
  "serde_json",

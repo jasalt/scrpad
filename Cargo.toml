@@ -66,6 +66,9 @@ wl-clipboard-rs = "0.9"
 # tree through crossterm.
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.3"
+# `--write` puts the note in the folder it opened when it asked (openat, linkat, renameat), not
+# in whatever is at that path when the user answers (src/handoff.rs). Already in the tree.
+rustix = { version = "1", features = ["fs"] }
 
 # The named pipe on Windows: a security descriptor that lets in only the current user
 # (widestring for its SDDL string), and CancelIoEx to give its reads and writes a deadline,

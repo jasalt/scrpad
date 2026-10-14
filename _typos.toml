@@ -7,3 +7,5 @@ extend-exclude = ["tests/data/", "assets/fonts/", "*.svg", "Cargo.lock"]
 PN = "PN"
 # The terminal UI library (ratatui.rs), not a misspelt ratatouille.
 ratatui = "ratatui"
+# The POSIX open flag O_WRONLY (rustix OFlags::WRONLY in src/handoff.rs).
+WRONLY = "WRONLY"

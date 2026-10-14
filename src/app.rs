@@ -1457,7 +1457,7 @@ impl App {
             ui.spacing_mut().item_spacing.y = 6.0;
             let note = |text: &str, color| egui::RichText::new(text).font(theme::regular(12.5)).color(color);
             match &approval.ask {
-                Ask::Write { title, path, exists, git_ignored } => {
+                Ask::Write { title, target: crate::handoff::Target { path, exists, .. }, git_ignored } => {
                     ui.label(egui::RichText::new(format!("Write “{title}” to a file?")).font(theme::semibold(14.0)).color(t.text));
                     ui.label(note(&path.display().to_string(), t.text_muted));
                     if *exists {
@@ -1519,7 +1519,11 @@ impl App {
                 let button =
                     |text: &str| egui::Button::new(egui::RichText::new(text).font(theme::semibold(13.0))).min_size(Vec2::new(72.0, 28.0));
                 // Right to left: the answer that hands the note over sits rightmost.
-                let allow = if matches!(approval.ask, Ask::Write { exists: true, .. }) { "Replace" } else { "Allow" };
+                let allow = if matches!(approval.ask, Ask::Write { target: crate::handoff::Target { exists: true, .. }, .. }) {
+                    "Replace"
+                } else {
+                    "Allow"
+                };
                 // Only a real click answers: not Space or Enter on a button that Tab focused while
                 // the user kept typing, nor an accessibility "click" another program can send.
                 let clicked = |resp: Response| resp.clicked_by(egui::PointerButton::Primary);

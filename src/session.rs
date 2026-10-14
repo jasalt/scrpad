@@ -86,8 +86,8 @@ impl ToastAction {
 
 /// What another launch asks to be handed, and that the user must allow first.
 pub enum Ask {
-    /// `--write`: the note titled `title` into the file at `path`.
-    Write { title: String, path: PathBuf, exists: bool, git_ignored: Option<bool> },
+    /// `--write`: the note titled `title` into the file `target.path`.
+    Write { title: String, target: handoff::Target, git_ignored: Option<bool> },
     /// `--run`: the note's variables to the command `argv`.
     Run { title: String, argv: Vec<String> },
     /// `--read`: the text of the note titled `title`. The server thread asks with `note` 0 and
@@ -529,9 +529,7 @@ impl Session {
         move |command| {
             let ask = match command {
                 crate::cli::Command::Write { title, dir } => match handoff::target(Path::new(dir), title) {
-                    Ok(t) => {
-                        Ask::Write { title: title.clone(), git_ignored: handoff::git_ignored(&t.path), path: t.path, exists: t.exists }
-                    }
+                    Ok(target) => Ask::Write { title: title.clone(), git_ignored: handoff::git_ignored(&target.path), target },
                     Err(e) => return Reply::Error(e),
                 },
                 crate::cli::Command::Run { title, argv } => Ask::Run { title: title.clone(), argv: argv.clone() },
@@ -679,8 +677,8 @@ impl Session {
             return Ok(());
         }
         let reply = match &a.ask {
-            Ask::Write { path, exists, .. } => match handoff::write(path, &text, *exists) {
-                Ok(()) => Reply::Text(format!("wrote {}", path.display())),
+            Ask::Write { target, .. } => match handoff::write(target, &text) {
+                Ok(()) => Reply::Text(format!("wrote {}", target.path.display())),
                 Err(e) => Reply::Error(e),
             },
             Ask::Run { title, .. } => match handoff::parse_env(&text) {
