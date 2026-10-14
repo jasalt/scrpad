@@ -80,7 +80,7 @@ enum Action {
     Menu,
     AutoLock,
     AutoRehide,
-    ScriptsRead,
+    ScriptsRead(ReadMode),
     Quit,
     QuitWithoutSaving,
 }
@@ -342,9 +342,8 @@ impl Tui {
             Action::Menu => self.modal = Some(Modal::Menu { selected: 0 }),
             Action::AutoLock => self.toggle_option(now, |s| &mut s.auto_lock),
             Action::AutoRehide => self.toggle_option(now, |s| &mut s.auto_rehide),
-            Action::ScriptsRead => {
-                let state = &mut self.session.state;
-                state.script_reading = if state.script_reading == ReadMode::Off { ReadMode::Always } else { ReadMode::Off };
+            Action::ScriptsRead(mode) => {
+                self.session.state.script_reading = mode;
                 self.session.mark_dirty(now);
             }
             Action::Quit => {
@@ -644,7 +643,13 @@ impl Tui {
         items.push(MenuItem::option("Lock encrypted notes automatically", Action::AutoLock, s.state.auto_lock));
         items.push(MenuItem::option("Hide notes again automatically", Action::AutoRehide, s.state.auto_rehide));
         // `scrpad --list` and `--read`. Hidden and encrypted notes stay out whatever this says.
-        items.push(MenuItem::option("Let scripts read notes", Action::ScriptsRead, s.state.script_reading != ReadMode::Off));
+        for (label, mode) in [
+            ("Let scripts read notes: off", ReadMode::Off),
+            ("Let scripts read notes: ask each time", ReadMode::Ask),
+            ("Let scripts read notes: always", ReadMode::Always),
+        ] {
+            items.push(MenuItem::option(label, Action::ScriptsRead(mode), s.state.script_reading == mode));
+        }
         items.push(MenuItem::new("Keys", "F1", Action::Help));
         items.push(MenuItem::new("Quit", "Ctrl+Q", Action::Quit));
         if s.save_error.is_some() {
@@ -712,6 +717,9 @@ impl Tui {
                 }
                 if self.unsaved.contains(&note.id) {
                     label.push_str(" *");
+                }
+                if !self.session.findings(note.id).is_empty() {
+                    label.push_str(" [!]");
                 }
                 label.push(' ');
                 let style = if i == state.active {
@@ -802,6 +810,7 @@ impl Tui {
             Line::from(spans)
         } else {
             let note = self.session.state.current();
+            let found = self.session.findings(note.id);
             let lock = match (note.is_encrypted(), note.is_locked()) {
                 (false, _) => "encrypt",
                 (true, false) => "lock",
@@ -811,6 +820,12 @@ impl Tui {
             let keys = [("^N", "new"), ("M-h", hide), ("^L", lock), ("^Y", "copy"), ("^Q", "quit"), ("F10", "menu"), ("F1", "keys")];
             let mut spans = vec![];
             let mut used = 0;
+            if let Some(first) = found.first() {
+                let more = if found.len() > 1 { format!(" (+{} more)", found.len() - 1) } else { String::new() };
+                let warning = format!(" [!] line {}: {}{more} ·", first.line, first.kind.label());
+                used += warning.chars().count();
+                spans.push(Span::styled(warning, style::ERROR));
+            }
             // Whole hints only: one cut in half helps no one.
             for (key, what) in keys {
                 used += key.len() + what.len() + 3;
@@ -916,9 +931,41 @@ impl Tui {
                         lines.extend(wrap(&crate::handoff::shown_command(argv), style::MUTED));
                         lines.extend(wrap("Its KEY=VALUE lines become the command's environment.", style::MUTED));
                     }
-                    // Placeholder until the read dialog (title, text, findings) is drawn.
-                    Ask::Read { title, .. } => {
+                    Ask::Read { title, text, findings, .. } => {
                         lines.extend(wrap(&format!("Let the agent read “{title}”?"), Style::new().add_modifier(Modifier::BOLD)));
+                        lines.extend(wrap("It may take this text as your instructions.", Style::new()));
+                        lines.push(Line::raw(""));
+                        // Hidden characters shown escaped; a few lines, the rest only counted.
+                        let (shown, _) = crate::scan::shown_text(text, 400, 32 << 10);
+                        let mut preview: Vec<&str> = Vec::new();
+                        let mut left = 0;
+                        for (n, line) in shown.lines().enumerate() {
+                            for part in editor::wrap(line, inner_w.saturating_sub(5)) {
+                                if preview.len() < 6 {
+                                    let flagged = findings.iter().any(|f| f.line == n + 1);
+                                    lines.push(Line::from(vec![
+                                        Span::styled(format!("{:>3} ", n + 1), style::MUTED),
+                                        Span::styled(part.to_owned(), if flagged { style::ERROR } else { Style::new() }),
+                                    ]));
+                                    preview.push(part);
+                                } else {
+                                    left += 1;
+                                }
+                            }
+                        }
+                        if left > 0 {
+                            lines.extend(wrap(&format!("… {left} more lines"), style::MUTED));
+                        }
+                        if !findings.is_empty() {
+                            lines.push(Line::raw(""));
+                            lines.extend(wrap("Looks like instructions for an AI:", style::ERROR));
+                            for f in findings.iter().take(6) {
+                                lines.extend(wrap(&format!("line {}: {}", f.line, f.kind.label()), style::ERROR));
+                            }
+                            if findings.len() > 6 {
+                                lines.extend(wrap(&format!("… and {} more", findings.len() - 6), style::ERROR));
+                            }
+                        }
                     }
                 }
                 let needs = self.session.approval_needs_password();
