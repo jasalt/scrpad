@@ -3,7 +3,7 @@
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use scrpad::App;
-use scrpad::store::{Note, State};
+use scrpad::store::{Note, ReadMode, State};
 use std::sync::{Mutex, MutexGuard};
 
 // Multiple concurrent wgpu harnesses can crash the software Vulkan backend.
@@ -627,16 +627,16 @@ fn reading_by_scripts_is_an_opt_in_menu_toggle_that_persists() {
     let mut h = harness_at(state, Some(path.clone()));
     h.state_mut().session.save_now();
     let socket = serve_scripts(&h, &dir);
-    assert!(!h.state().session.state.scripts_can_read);
+    assert_eq!(h.state().session.state.script_reading, ReadMode::Off);
     assert_eq!(ask(&socket, scrpad::cli::Command::List), Reply::Error(scrpad::scripts::READING_OFF.into()));
 
     h.get_by_label("More").click();
     h.run_steps(2);
     h.get_by_label("Let scripts read notes").click();
     h.run_steps(2);
-    assert!(h.state().session.state.scripts_can_read);
+    assert_eq!(h.state().session.state.script_reading, ReadMode::Always);
     h.state_mut().session.save_now();
-    assert!(State::load(&path).unwrap().scripts_can_read);
+    assert_eq!(State::load(&path).unwrap().script_reading, ReadMode::Always);
     // The hidden note is neither listed nor read.
     assert_eq!(ask(&socket, scrpad::cli::Command::List), Reply::Text("Scratchpad 1\nScratchpad 2\n".into()));
     assert_eq!(ask(&socket, scrpad::cli::Command::Read("Scratchpad 1".into())), Reply::Text("TODO: ship it".into()));
@@ -645,8 +645,8 @@ fn reading_by_scripts_is_an_opt_in_menu_toggle_that_persists() {
     // Turned off, reading stops at once, before the change is saved.
     h.get_by_label("Let scripts read notes").click();
     h.run_steps(2);
-    assert!(!h.state().session.state.scripts_can_read);
-    assert!(State::load(&path).unwrap().scripts_can_read);
+    assert_eq!(h.state().session.state.script_reading, ReadMode::Off);
+    assert_eq!(State::load(&path).unwrap().script_reading, ReadMode::Always);
     assert_eq!(ask(&socket, scrpad::cli::Command::List), Reply::Error(scrpad::scripts::READING_OFF.into()));
     drop(h);
     let _ = std::fs::remove_dir_all(dir);

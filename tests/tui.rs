@@ -7,7 +7,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use scrpad::Session;
-use scrpad::store::{Note, State};
+use scrpad::store::{Note, ReadMode, State};
 use scrpad::tui::Tui;
 
 struct Screen {
@@ -294,7 +294,7 @@ fn rename_and_menu_options() {
     }
     s.type_text("ostokset\n");
     assert_eq!(s.current().title, "ostokset");
-    assert!(!s.tui.session.state.scripts_can_read);
+    assert_eq!(s.tui.session.state.script_reading, ReadMode::Off);
     s.key(KeyCode::F(10), KeyModifiers::NONE);
     let screen = s.text();
     let options = screen.lines().position(|l| l.contains("[ ] Let scripts read notes")).unwrap();
@@ -303,7 +303,7 @@ fn rename_and_menu_options() {
         s.press(KeyCode::Down);
     }
     s.press(KeyCode::Enter);
-    assert!(s.tui.session.state.scripts_can_read);
+    assert_ne!(s.tui.session.state.script_reading, ReadMode::Off);
     assert!(s.text().contains("[x] Let scripts read notes"), "options keep the menu open");
 }
 
