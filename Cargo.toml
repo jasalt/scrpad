@@ -47,6 +47,11 @@ ratatui = { version = "0.30", default-features = false, features = ["crossterm_0
 # The editor's cursor steps over whole characters (é, emoji, CJK) and words; columns are counted
 # with ratatui's own CellWidth, so they match what it draws. Already in the tree (ratatui, egui).
 unicode-segmentation = "1"
+# The injection scan (src/scan.rs) reads text the way a person does: NFKC folds fullwidth and
+# ligature letters, script and category tables find lookalikes and invisible characters.
+# Already in the tree through url/idna, so they add no crates.
+icu_normalizer = { version = "2", default-features = false, features = ["compiled_data"] }
+icu_properties = { version = "2", default-features = false, features = ["compiled_data"] }
 
 # Only Windows builds embed the .exe icon (build.rs).
 [target.'cfg(windows)'.build-dependencies]

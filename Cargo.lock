@@ -3726,6 +3726,8 @@ dependencies = [
  "egui_extras",
  "egui_kittest",
  "getrandom 0.4.3",
+ "icu_normalizer",
+ "icu_properties",
  "interprocess",
  "ratatui",
  "rfd",

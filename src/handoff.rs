@@ -99,9 +99,7 @@ pub fn shown_command(argv: &[String]) -> String {
 }
 
 /// Characters that change how the text around them looks, or show as nothing.
-fn is_hidden(c: char) -> bool {
-    c.is_control() || matches!(c, '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}')
-}
+use crate::scan::is_hidden;
 
 fn shell_quote(arg: &str) -> String {
     let plain = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c);
