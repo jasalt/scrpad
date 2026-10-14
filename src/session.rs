@@ -449,7 +449,7 @@ impl Session {
                 if scan::scan(&text).is_empty() {
                     self.toast(now, format!("Added to “{title}”"), None);
                 } else {
-                    self.toast(now, format!("Added to “{title}”: it may hold instructions for an AI (see ! on its tab)"), None);
+                    self.toast(now, format!("Added to “{title}”: it may hold instructions for an AI (see the warning on its tab)"), None);
                 }
             }
         }
