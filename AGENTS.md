@@ -32,6 +32,7 @@ or add one narrow suppression with the reason next to it.
 | `src/clipboard.rs` | clears a copied secret if the clipboard still holds it | clipboard work |
 | `src/tui/` | terminal frontend (`--tui`): keys and drawing, own editor, terminal loop | terminal UI work |
 | `plugin/`, `.claude-plugin/` | Claude Code plugin: the skill (`scrpad --skill` prints it too) and the `.env` hook | agent instructions or the hook |
+| `INSTALL.md` | steps an AI agent follows to install a release and set itself up; README links to it on `main` | release, packaging or `--install-agent` changes |
 | `tests/ui.rs` | egui_kittest UI tests | any UI change |
 | `tests/tui.rs` | terminal UI tests on ratatui's `TestBackend` | any terminal UI change |
 | README.md § Hiding and encryption, § Scripts and agents | the security model and its limits | any change near secrets |
