@@ -18,6 +18,9 @@ use crate::store::{Note, ReadMode, State};
 pub const NOBODY_TO_ASK: &str = "scrpad is not open to ask you; open it (the window, or scrpad --tui) and try again";
 pub const READING_ASKS: &str = "scrpad asks you before each read now; try again";
 pub const READING_OFF: &str = "reading notes is off; turn on “Let scripts read notes” in the … menu of scrpad";
+/// A title no readable note has. Not said back: the shell may have put a secret in it
+/// (`scrpad --read "$(cat .env)"`), and the agent reads errors.
+pub const NO_READABLE_NOTE: &str = "no readable note has that title";
 
 /// What a running window shares with the thread that answers scripts. The window holds the lock
 /// while it saves, and adds the waiting appends to its notes first, so an append on disk is never
@@ -167,12 +170,7 @@ pub fn list(state: &State, window: Option<&Window>) -> Result<String, String> {
 /// The text of the first readable note titled `title`, in tab order.
 pub fn read<'a>(state: &'a State, title: &str, window: Option<&Window>) -> Result<&'a str, String> {
     may_read(state, window)?;
-    state
-        .notes
-        .iter()
-        .find(|n| n.title == title && readable(n, window))
-        .map(|n| n.text.as_str())
-        .ok_or_else(|| format!("no readable note is titled “{title}”"))
+    state.notes.iter().find(|n| n.title == title && readable(n, window)).map(|n| n.text.as_str()).ok_or_else(|| NO_READABLE_NOTE.to_owned())
 }
 
 #[cfg(test)]

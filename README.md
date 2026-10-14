@@ -171,7 +171,7 @@ What the dialog guarantees:
 
 **Limits, plainly.** Once `.env` is on the disk, scrpad no longer controls who reads it. The agent can `cat` it unless its tool rules stop that, and filters on shell commands are best effort. `--run` keeps the secret off the disk, but the command's own output can still print it, and the agent sees that output. Prefer `--run` when the program takes its settings from the environment. The dialog stops an agent that uses scrpad's commands as intended, not one set on defeating it: such an agent can speak scrpad's socket protocol itself, drive the desktop, or change what the allowed command does (a `package.json` script, say).
 
-A hook can block reading the files by name, in Claude Code and in Codex. The Claude Code plugin and `scrpad --install-agent codex` (both below) bring one: it stops a tool call that names `.env` or a name like `.env.local` (but not `.env.example`), tells the agent why, and lets through the scrpad commands that name the note (`scrpad --run .env -- …`). It needs `jq`. It is best effort: quoting tricks, a shell glob such as `cat .e*`, or other file names can still slip past it.
+A hook can block reading the files by name, in Claude Code and in Codex. The Claude Code plugin and `scrpad --install-agent codex` (both below) bring one: it stops a tool call that names `.env` or a name like `.env.local` (but not `.env.example`), tells the agent why, and lets through the scrpad commands that name the note (`scrpad --run .env -- …`), unless the title would run something (`"$(cat .env)"`). It needs `jq`. It is best effort: quoting tricks, a shell glob such as `cat .e*`, or other file names can still slip past it.
 
 ### Teaching your agent
 

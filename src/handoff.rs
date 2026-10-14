@@ -22,7 +22,7 @@ pub fn check_file_name(title: &str) -> Result<(), String> {
     } else if title.len() > MAX_NAME {
         Err(format!("a file name takes at most {MAX_NAME} bytes"))
     } else if title.chars().any(|c| c.is_control() || matches!(c, '/' | '\\' | ':')) {
-        Err(format!("“{title}” holds a / \\ : or a control character; the title must be a plain file name"))
+        Err("the title holds a / \\ : or a control character; it must be a plain file name".into())
     } else {
         Ok(())
     }

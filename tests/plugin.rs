@@ -67,6 +67,16 @@ fn the_hook_blocks_handoff_files_but_not_the_round_trip() {
         bash("scrpad --read .env"),
         bash("scrpad --write .env . && cat .env"),
         bash("scrpad --run .env -- cat .env"),
+        // A title that runs code is not a title: what it runs is checked like the rest.
+        bash("scrpad --append \"$(cat .env)\" -"),
+        bash("scrpad --run \"$(cat .env)\" -- true"),
+        bash("scrpad --write \"$(cat .env)\" /tmp"),
+        bash("scrpad --append \"$(cp .env /tmp/x)\" -"),
+        bash("scrpad --append $(cat<.env) -"),
+        bash("cat<.env"),
+        bash("scrpad --append x `cat .env`"),
+        bash("scrpad --append \"`cat .env`\" -"),
+        bash("scrpad --append \"\\$(cat .env)\" -"),
     ] {
         assert_eq!(hook(blocked.clone()), 2, "{blocked}");
     }
@@ -77,6 +87,8 @@ fn the_hook_blocks_handoff_files_but_not_the_round_trip() {
         bash("scrpad --append \".env\" -"),
         bash("scrpad --write .env ."),
         bash("scrpad --run '.env' -- npm run dev"),
+        // Single quotes run nothing.
+        bash("scrpad --append '$(cat .env)' -"),
     ] {
         assert_eq!(hook(allowed.clone()), 0, "{allowed}");
     }

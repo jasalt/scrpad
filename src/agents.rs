@@ -30,7 +30,10 @@ const SKILL_DIGESTS: &[&str] = &[
     "6e0acbcd81db95e5d0cde62dc5b75e9dc2f2b18f3d2cf1371dc3653aea401b94",
 ];
 const SH_DIGESTS: &[&str] = &["7fddac538679daba80d4ccfe3eb6a1ada7faa45c43237ed19fdc0126d3a3ae21"];
-const JQ_DIGESTS: &[&str] = &["b5ce7674c323114a0f83a50a2da8c80d8cca84e696217f32528c03b26ae2d00e"];
+const JQ_DIGESTS: &[&str] = &[
+    "b5ce7674c323114a0f83a50a2da8c80d8cca84e696217f32528c03b26ae2d00e",
+    "462da50323a5982fd71f50726845a774d1f917fbcb622faedf11e5c793536168",
+];
 
 /// What the hook command in hooks.json contains, whoever wrote the rest of the command.
 const HOOK_SCRIPT: &str = "scrpad/handoff-files.sh";

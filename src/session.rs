@@ -588,8 +588,9 @@ impl Session {
                         continue;
                     }
                 },
+                // The title is not said back: the shell may have put a secret in it.
                 ask if !self.state.notes.iter().any(|n| n.title == ask.title()) => {
-                    let _ = reply.send(Reply::Error(format!("no note is titled “{}”", ask.title())));
+                    let _ = reply.send(Reply::Error("no note has that title".into()));
                     continue;
                 }
                 ask => ask,
@@ -608,7 +609,7 @@ impl Session {
         }
         match self.state.notes.iter().find(|n| n.title == title && scripts::readable(n, None)) {
             Some(note) => Ok(Ask::Read { note: note.id, text: note.text.clone(), findings: scan::scan(&note.text), title }),
-            None => Err(format!("no readable note is titled “{title}”")),
+            None => Err(scripts::NO_READABLE_NOTE.into()),
         }
     }
 
@@ -1146,8 +1147,9 @@ mod tests {
         wait_for_approval(&mut s, 1.0);
         s.deny(2.0);
         assert!(matches!(job.join().unwrap(), Reply::Error(e) if e.contains("denied")));
-        // No such note: answered at once, no dialog.
-        let job = ask_and_wait(&s, Command::Run { title: "nope".into(), argv: vec!["env".into()] });
+        // No such note: answered at once, no dialog, and the title is not said back, as a shell
+        // may have put a secret in it.
+        let job = ask_and_wait(&s, Command::Run { title: "API_KEY=s3cret".into(), argv: vec!["env".into()] });
         for _ in 0..200 {
             s.poll_approvals(3.0);
             if job.is_finished() {
@@ -1156,7 +1158,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         let reply = job.join().unwrap();
-        assert!(matches!(reply, Reply::Error(e) if e.contains("no note")));
+        assert!(matches!(reply, Reply::Error(e) if e.contains("no note") && !e.contains("s3cret")));
         assert!(s.approval.is_none());
     }
 
@@ -1451,7 +1453,7 @@ mod tests {
             let job = ask_and_wait(&s, Command::Read(title.into()));
             answered(&mut s, &job);
             let Reply::Error(e) = job.join().unwrap() else { panic!() };
-            assert_eq!(e, format!("no readable note is titled “{title}”"));
+            assert_eq!(e, crate::scripts::NO_READABLE_NOTE);
             assert!(s.approval.is_none());
         }
         // A readable note with the same title as a hidden one is the one asked about.
