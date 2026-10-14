@@ -1,6 +1,6 @@
 {
   "name": "scrpad",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Use the scrpad notepad from Claude Code: save snippets for the user, and hand a .env note to a project without seeing the secrets",
   "author": { "name": "Miika Havo" },
   "homepage": "https://github.com/mhavo/scrpad",
