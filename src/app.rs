@@ -147,8 +147,9 @@ impl App {
                 ctx.request_repaint();
             }
         };
+        let asks = self.session.asks();
         crate::instance::serve(listener, move |command| {
-            if command.needs_approval() {
+            if asks(&command) {
                 // The question must be seen: bring the window here as `scrpad` does, then wait.
                 show();
                 return answer_approval(&command);
@@ -710,7 +711,8 @@ impl App {
         let galley = ui.painter().layout_no_wrap(title, font, color);
         let x_w = if selected { 20.0 } else { 0.0 };
         let lock_w = if self.session.state.notes[i].is_encrypted() { 16.0 } else { 0.0 };
-        let size = Vec2::new(galley.size().x + 20.0 + x_w + lock_w, h);
+        let warn_w = if self.session.findings(self.session.state.notes[i].id).is_empty() { 0.0 } else { 16.0 };
+        let size = Vec2::new(galley.size().x + 20.0 + x_w + lock_w + warn_w, h);
         // Dragging sideways reorders; a click still selects and a double-click renames. The id
         // follows the note, so a drag carries on while the tab changes places.
         let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
@@ -740,7 +742,22 @@ impl App {
                 t.secure,
             );
         }
-        ui.painter().galley(Pos2::new(rect.left() + 10.0 + lock_w, rect.center().y - galley.size().y / 2.0), galley, color);
+        if warn_w > 0.0 {
+            let mark = Rect::from_center_size(Pos2::new(rect.left() + 16.0 + lock_w, rect.center().y), Vec2::splat(14.0));
+            icons::paint(ui, mark, "triangle-alert", 13.0, t.error);
+            let findings = self.session.findings(self.session.state.notes[i].id);
+            let mut tip = String::from("May hold instructions for an AI:");
+            for f in findings.iter().take(10) {
+                tip.push_str(&format!("\nLine {}: {}", f.line, f.kind.label()));
+            }
+            if findings.len() > 10 {
+                tip.push_str(&format!("\n…and {} more", findings.len() - 10));
+            }
+            let warn = ui.interact(mark, Id::new(("tab-warn", self.session.state.notes[i].id)), Sense::hover());
+            warn.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Warnings"));
+            warn.on_hover_text(tip);
+        }
+        ui.painter().galley(Pos2::new(rect.left() + 10.0 + lock_w + warn_w, rect.center().y - galley.size().y / 2.0), galley, color);
         let id = self.session.state.notes[i].id;
         if selected && self.scrolled_to != Some(id) {
             self.scrolled_to = Some(id);
@@ -1175,10 +1192,13 @@ impl App {
             self.session.mark_dirty(now);
         }
         // `scrpad --list` and `--read`. Hidden and encrypted notes stay out whatever this says.
-        if menu_item(ui, t, "Let scripts read notes", "", self.session.state.script_reading != ReadMode::Off).clicked() {
-            self.session.state.script_reading =
-                if self.session.state.script_reading == ReadMode::Off { ReadMode::Always } else { ReadMode::Off };
-            self.session.mark_dirty(now);
+        ui.add_space(2.0);
+        ui.label(egui::RichText::new("Let scripts read notes").font(theme::regular(12.0)).color(t.text_muted));
+        for mode in [ReadMode::Off, ReadMode::Ask, ReadMode::Always] {
+            if menu_item(ui, t, mode.label(), "", self.session.state.script_reading == mode).clicked() {
+                self.session.state.script_reading = mode;
+                self.session.mark_dirty(now);
+            }
         }
         separator(ui, t);
         let checking = self.session.update_check.is_some();
@@ -1204,21 +1224,24 @@ impl App {
         }
         ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(toast.until - now));
         let font = theme::regular(13.0);
-        let text = ui.painter().layout_no_wrap(toast.text.clone(), font.clone(), t.text);
         let label = toast.action.as_ref().map(ToastAction::label);
         let action_label = label.map(|l| ui.painter().layout_no_wrap(l.into(), theme::semibold(13.0), t.accent));
-        let w = text.size().x + 24.0 + action_label.as_ref().map_or(0.0, |g| g.size().x + 14.0);
-        let rect = Rect::from_center_size(Pos2::new(above.center().x, above.bottom() - 22.0), Vec2::new(w, 28.0));
+        let action_w = action_label.as_ref().map_or(0.0, |g| g.size().x + 14.0);
+        // A long message wraps instead of running out of the window.
+        let wrap = (above.width() - 48.0 - action_w).max(100.0);
+        let text = ui.painter().layout(toast.text.clone(), font.clone(), t.text, wrap);
+        let w = text.size().x + 24.0 + action_w;
+        let h = (text.size().y + 12.0).max(28.0);
+        let rect = Rect::from_center_size(Pos2::new(above.center().x, above.bottom() - 8.0 - h / 2.0), Vec2::new(w, h));
         let read_out = ui.interact(rect, Id::new("toast"), Sense::hover());
         read_out.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &toast.text));
         let p = ui.painter();
         p.rect_filled(rect.translate(Vec2::new(0.0, 2.0)), 14.0, Color32::from_black_alpha(40));
         p.rect_filled(rect, 14.0, t.popup);
         p.rect_stroke(rect, 14.0, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
-        let text_w = text.size().x;
         p.galley(Pos2::new(rect.left() + 12.0, rect.center().y - text.size().y / 2.0), text, t.text);
         if let (Some(g), Some(label)) = (action_label, label) {
-            let r = Rect::from_min_size(Pos2::new(rect.left() + 12.0 + text_w + 14.0, rect.center().y - g.size().y / 2.0), g.size());
+            let r = Rect::from_min_size(Pos2::new(rect.right() - 12.0 - g.size().x, rect.center().y - g.size().y / 2.0), g.size());
             ui.painter().galley(r.min, g, t.accent);
             let resp = ui.interact(r.expand(4.0), Id::new("toast-action"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
@@ -1427,7 +1450,8 @@ impl App {
             .corner_radius(10)
             .inner_margin(egui::Margin::same(16))
             .shadow(egui::Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(90) });
-        let width = (ctx.content_rect().width() - 64.0).clamp(200.0, 320.0);
+        let widest = if matches!(approval.ask, Ask::Read { .. }) { 440.0 } else { 320.0 };
+        let width = (ctx.content_rect().width() - 64.0).clamp(200.0, widest);
         let modal = egui::Modal::new(Id::new("approval")).frame(frame).backdrop_color(Color32::from_black_alpha(110));
         modal.show(ctx, |ui| {
             ui.set_width(width);
@@ -1450,9 +1474,28 @@ impl App {
                     ui.label(egui::RichText::new(crate::handoff::shown_command(argv)).font(font).color(t.text_muted));
                     ui.label(note("Its KEY=VALUE lines become the command's environment.", t.text_muted));
                 }
-                // Placeholder until the read dialog (title, text, findings) is drawn.
-                Ask::Read { title, .. } => {
+                Ask::Read { title, text, findings, .. } => {
                     ui.label(egui::RichText::new(format!("Let the agent read “{title}”?")).font(theme::semibold(14.0)).color(t.text));
+                    ui.label(note("It may take this text as your instructions.", t.text_muted));
+                    read_preview(ui, t, text, findings);
+                    if !findings.is_empty() {
+                        egui::Frame::new()
+                            .fill(t.error.gamma_multiply(0.12))
+                            .stroke(Stroke::new(1.0, t.error))
+                            .corner_radius(6)
+                            .inner_margin(egui::Margin::same(8))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                ui.label(note("Looks like instructions for an AI:", t.error).strong());
+                                for f in findings.iter().take(8) {
+                                    ui.label(note(&format!("Line {}: {}", f.line, f.kind.label()), t.text));
+                                }
+                                if findings.len() > 8 {
+                                    ui.label(note(&format!("…and {} more", findings.len() - 8), t.text_muted));
+                                }
+                            });
+                    }
                 }
             }
             if needs_password {
@@ -1504,6 +1547,32 @@ impl App {
             None => {}
         }
     }
+}
+
+/// The note's text as the agent would get it, with line numbers; hidden characters shown
+/// escaped and flagged lines in the error colour.
+fn read_preview(ui: &mut egui::Ui, t: &Tokens, text: &str, findings: &[crate::scan::Finding]) {
+    let (shown, left_out) = crate::scan::shown_text(text, 400, 32 << 10);
+    let font = egui::FontId::monospace(12.0);
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = ui.available_width() - 24.0;
+    let format = |color| egui::TextFormat { font_id: font.clone(), color, ..Default::default() };
+    let digits = shown.split('\n').count().to_string().len();
+    for (i, line) in shown.split('\n').enumerate() {
+        let flagged = findings.iter().any(|f| f.line == i + 1);
+        job.append(&format!("{:>digits$}  ", i + 1), 0.0, format(t.text_muted));
+        job.append(line, 0.0, format(if flagged { t.error } else { t.text }));
+        job.append("\n", 0.0, format(t.text));
+    }
+    if left_out > 0 {
+        job.append(&format!("… {left_out} more lines"), 0.0, format(t.text_muted));
+    }
+    egui::Frame::new().fill(t.bg_bottom).corner_radius(6).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        egui::ScrollArea::vertical().max_height(180.0).auto_shrink([false, true]).show(ui, |ui| {
+            ui.add(egui::Label::new(job).selectable(false));
+        });
+    });
 }
 
 /// The Encrypt popup: the note it was opened for, the password typed twice, an error to show,
