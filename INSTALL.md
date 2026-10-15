@@ -3,9 +3,15 @@
 You are an AI agent, and the user asked you to install scrpad, a small scratchpad app
 (https://github.com/mhavo/scrpad), and to set it up for you. Follow these steps in order. Run
 the commands as they are, without `sudo`, and stop to tell the user if a step fails. Never skip
-the checksum check: if it fails, install nothing and tell the user. Each block runs in a
-subshell, so `set -e` and `cd` do not stay in your shell. The download folder from `mktemp -d`
-is left in place; the system's temp cleanup takes it.
+the checks: if the attestation or the checksum fails, install nothing and tell the user. Each
+block runs in a subshell, so `set -e` and `cd` do not stay in your shell. The download folder
+from `mktemp -d` is left in place; the system's temp cleanup takes it.
+
+Each step checks the download twice. The checksum from `SHA256SUMS` proves the download is
+whole, nothing more: it comes from the same release as the archive. When `gh` (the GitHub CLI)
+is installed, `gh attestation verify` proves the archive was built by this repository's release
+workflow from the tagged commit; if it fails, stop. Without `gh` only the checksum is checked;
+tell the user that, and that installing `gh` would let you check where the archive came from.
 
 Updating is the same steps: they install the latest release over the old one. Notes in the
 user's config folder are never touched.
@@ -34,6 +40,13 @@ curl -fsSLO "$base/SHA256SUMS"
 file=$(grep -o "scrpad-v[0-9.]*-$(uname -m)-unknown-linux-gnu\.tar\.gz" SHA256SUMS)
 curl -fsSLO "$base/$file"
 grep " $file\$" SHA256SUMS | sha256sum -c -
+if command -v gh >/dev/null; then
+  ver=${file#scrpad-}; ver=${ver%%-*}
+  gh attestation verify "$file" --repo mhavo/scrpad \
+    --signer-workflow mhavo/scrpad/.github/workflows/release.yml --source-ref "refs/tags/$ver"
+else
+  echo "gh not found: only the checksum was checked, which proves the download is whole" >&2
+fi
 tar xzf "$file"
 "./${file%.tar.gz}/install.sh"
 )
@@ -55,6 +68,13 @@ curl -fsSLO "$base/SHA256SUMS"
 file=$(grep -o 'scrpad-v[0-9.]*-macos-universal\.zip' SHA256SUMS)
 curl -fsSLO "$base/$file"
 grep " $file\$" SHA256SUMS | shasum -a 256 -c -
+if command -v gh >/dev/null; then
+  ver=${file#scrpad-}; ver=${ver%%-*}
+  gh attestation verify "$file" --repo mhavo/scrpad \
+    --signer-workflow mhavo/scrpad/.github/workflows/release.yml --source-ref "refs/tags/$ver"
+else
+  echo "gh not found: only the checksum was checked, which proves the download is whole" >&2
+fi
 ditto -x -k "$file" .
 apps=/Applications; [ -w "$apps" ] || apps="$HOME/Applications"; mkdir -p "$apps"
 rm -rf "$apps/scrpad.app"
@@ -81,6 +101,14 @@ Invoke-WebRequest "$base/SHA256SUMS" -OutFile "$tmp\SHA256SUMS"
 $hash, $file = (Select-String "$tmp\SHA256SUMS" -Pattern 'x86_64-pc-windows-msvc\.zip$').Line -split '\s+'
 Invoke-WebRequest "$base/$file" -OutFile "$tmp\$file"
 if ((Get-FileHash "$tmp\$file" -Algorithm SHA256).Hash -ne $hash) { throw 'checksum mismatch' }
+if (Get-Command gh -ErrorAction SilentlyContinue) {
+  $ver = ($file -split '-')[1]
+  gh attestation verify "$tmp\$file" --repo mhavo/scrpad `
+    --signer-workflow mhavo/scrpad/.github/workflows/release.yml --source-ref "refs/tags/$ver"
+  if ($LASTEXITCODE -ne 0) { throw 'attestation check failed' }
+} else {
+  Write-Warning 'gh not found: only the checksum was checked, which proves the download is whole'
+}
 Expand-Archive "$tmp\$file" -DestinationPath $tmp
 $dest = "$env:LOCALAPPDATA\Programs\scrpad"
 New-Item -ItemType Directory $dest -Force | Out-Null

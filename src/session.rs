@@ -678,6 +678,9 @@ impl Session {
                     }
                 },
                 // The title is not said back: the shell may have put a secret in it.
+                // An unknown title is answered here, from the window's poll, like every other request: answering
+                // it earlier on the server thread would let timing tell a missing title from a hidden or
+                // encrypted one, which waits for a dialog. Keep it here.
                 ask if !self.state.notes.iter().any(|n| n.title == ask.title()) => {
                     let _ = reply.send(Reply::Error("no note has that title".into()));
                     continue;
