@@ -192,6 +192,8 @@ pub struct State {
     pub auto_lock: bool,
     /// Hide again, on the same occasions, the hidden notes revealed since.
     pub auto_rehide: bool,
+    /// Warn about orders aimed at an AI, hidden characters and the like. Off: no scan runs.
+    pub warnings: bool,
     /// What `scrpad --list` and `--read` may do. Off unless the user chooses otherwise: what a
     /// script reads may end up with an AI provider.
     pub script_reading: ReadMode,
@@ -214,6 +216,7 @@ impl Default for State {
             next_id: 1,
             auto_lock: true,
             auto_rehide: true,
+            warnings: true,
             script_reading: ReadMode::Off,
             hide_from_capture: false,
         };
@@ -546,9 +549,13 @@ mod tests {
         assert!(!s.notes[0].is_encrypted());
         assert!(s.notes[1].is_locked() && s.notes[1].text.is_empty());
         // Options added later default to on, except reading by scripts.
-        assert!(s.auto_lock && s.auto_rehide && s.script_reading == ReadMode::Off);
+        assert!(s.auto_lock && s.auto_rehide && s.warnings && s.script_reading == ReadMode::Off);
         let s: State = serde_json::from_str(r#"{"auto_lock":false}"#).unwrap();
         assert!(!s.auto_lock && s.auto_rehide);
+        let s: State = serde_json::from_str(r#"{"auto_lock":false,"auto_rehide":false}"#).unwrap();
+        assert!(s.warnings, "a file from before the option loads with warnings on");
+        let s: State = serde_json::from_str(r#"{"warnings":false}"#).unwrap();
+        assert!(!s.warnings);
         let s: State = serde_json::from_str(r#"{"script_reading":"ask"}"#).unwrap();
         assert_eq!(s.script_reading, ReadMode::Ask);
         let s: State = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();

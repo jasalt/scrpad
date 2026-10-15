@@ -80,6 +80,7 @@ enum Action {
     Menu,
     AutoLock,
     AutoRehide,
+    Warnings,
     ScriptsRead(ReadMode),
     Quit,
     QuitWithoutSaving,
@@ -342,6 +343,7 @@ impl Tui {
             Action::Menu => self.modal = Some(Modal::Menu { selected: 0 }),
             Action::AutoLock => self.toggle_option(now, |s| &mut s.auto_lock),
             Action::AutoRehide => self.toggle_option(now, |s| &mut s.auto_rehide),
+            Action::Warnings => self.session.set_warnings(!self.session.state.warnings, now),
             Action::ScriptsRead(mode) => {
                 self.session.set_reading(mode, now);
             }
@@ -641,6 +643,7 @@ impl Tui {
         // On quitting and after 5 minutes without input.
         items.push(MenuItem::option("Lock encrypted notes automatically", Action::AutoLock, s.state.auto_lock));
         items.push(MenuItem::option("Hide notes again automatically", Action::AutoRehide, s.state.auto_rehide));
+        items.push(MenuItem::option("Warnings", Action::Warnings, s.state.warnings));
         // `scrpad --list` and `--read`. Hidden and encrypted notes stay out whatever this says.
         for (label, mode) in [
             ("Let scripts read notes: off", ReadMode::Off),

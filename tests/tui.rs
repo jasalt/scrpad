@@ -246,7 +246,7 @@ fn ctrl_q_saves_and_quits() {
 fn a_failed_save_stays_on_screen_and_keeps_the_app_open() {
     let dir = temp_dir("blocked");
     std::fs::write(dir.join("file"), "not a directory").unwrap();
-    let mut s = Screen::new(sample(), Some(dir.join("file").join("notes.json")));
+    let mut s = Screen::sized(sample(), Some(dir.join("file").join("notes.json")), 80, 30);
     s.type_text("eggs");
     s.ctrl('q');
     assert!(!s.tui.quit_requested());
@@ -411,6 +411,58 @@ fn a_note_with_findings_is_marked() {
     let tabs = screen.lines().next().unwrap();
     assert!(tabs.contains("plan [!]"), "{screen}");
     assert!(screen.lines().last().unwrap().contains("[!] line 2: asks to ignore earlier instructions"), "{screen}");
+}
+
+#[test]
+fn warnings_off_in_the_menu_removes_the_marks_and_the_scan() {
+    let mut s = Screen::new(injected_state(), None);
+    assert!(s.text().contains("plan [!]"));
+    s.key(KeyCode::F(10), KeyModifiers::NONE);
+    let screen = s.text();
+    assert!(screen.contains("[x] Warnings"), "{screen}");
+    let first = screen.lines().position(|l| l.contains("Rename note")).unwrap();
+    let item = screen.lines().position(|l| l.contains("[x] Warnings")).unwrap();
+    for _ in first..item {
+        s.press(KeyCode::Down);
+    }
+    s.press(KeyCode::Enter);
+    assert!(!s.tui.session.state.warnings);
+    let screen = s.text();
+    assert!(screen.contains("[ ] Warnings"), "{screen}");
+    assert!(s.tui.session.findings(s.tui.session.state.notes[0].id).is_empty());
+    s.press(KeyCode::Esc);
+    let screen = s.text();
+    assert!(!screen.contains("[!]"), "{screen}");
+    // Back on: scanned again at once.
+    s.key(KeyCode::F(10), KeyModifiers::NONE);
+    for _ in first..item {
+        s.press(KeyCode::Down);
+    }
+    s.press(KeyCode::Enter);
+    s.press(KeyCode::Esc);
+    assert!(s.text().contains("plan [!]"));
+}
+
+#[test]
+fn a_read_with_warnings_off_shows_no_findings() {
+    let mut state = injected_state();
+    state.warnings = false;
+    let mut s = Screen::new(state, None);
+    let server = s.tui.session.approval_server();
+    let job = std::thread::spawn(move || server(&scrpad::cli::Command::Read("plan".into())));
+    for _ in 0..100 {
+        s.tui.tick(s.now);
+        if s.tui.session.approval.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let screen = s.text();
+    assert!(screen.contains("Let the agent read “plan”?"), "{screen}");
+    assert!(!screen.contains("asks to ignore earlier instructions"), "{screen}");
+    s.now += 1.0;
+    s.press(KeyCode::Char('n'));
+    let _ = job.join();
 }
 
 #[test]

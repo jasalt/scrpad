@@ -1191,6 +1191,9 @@ impl App {
             self.session.state.auto_rehide = !self.session.state.auto_rehide;
             self.session.mark_dirty(now);
         }
+        if menu_item(ui, t, "Warnings", "", self.session.state.warnings).clicked() {
+            self.session.set_warnings(!self.session.state.warnings, now);
+        }
         // `scrpad --list` and `--read`. Hidden and encrypted notes stay out whatever this says.
         ui.add_space(2.0);
         ui.label(egui::RichText::new("Let scripts read notes").font(theme::regular(12.0)).color(t.text_muted));

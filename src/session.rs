@@ -336,6 +336,10 @@ impl Session {
     /// Scans the notes whose text changed since they were scanned. Not per frame: when saving,
     /// after appends and on unlocking. A locked note has no text to scan, a closed one no entry.
     fn rescan(&mut self) {
+        if !self.state.warnings {
+            self.scans.clear();
+            return;
+        }
         let notes = &self.state.notes;
         self.scans.retain(|id, _| notes.iter().any(|n| n.id == *id && !n.is_locked()));
         for note in notes.iter().filter(|n| !n.is_locked()) {
@@ -475,7 +479,12 @@ impl Session {
                 && self.toast.as_ref().is_none_or(|t| t.action.is_none())
             {
                 // The note as it is now: a finding from before the append counts too.
-                let flagged = self.state.notes.iter().find(|n| n.title == title).is_some_and(|n| !scan::scan(&n.text).is_empty());
+                let flagged = self
+                    .state
+                    .notes
+                    .iter()
+                    .find(|n| n.title == title)
+                    .is_some_and(|n| self.state.warnings && !scan::scan(&n.text).is_empty());
                 if flagged {
                     self.toast(
                         now,
@@ -608,7 +617,12 @@ impl Session {
             return Err(scripts::READING_OFF.into());
         }
         match self.state.notes.iter().find(|n| n.title == title && scripts::readable(n, None)) {
-            Some(note) => Ok(Ask::Read { note: note.id, text: note.text.clone(), findings: scan::scan(&note.text), title }),
+            Some(note) => Ok(Ask::Read {
+                note: note.id,
+                text: note.text.clone(),
+                findings: if self.state.warnings { scan::scan(&note.text) } else { Vec::new() },
+                title,
+            }),
             None => Err(scripts::NO_READABLE_NOTE.into()),
         }
     }
@@ -731,6 +745,13 @@ impl Session {
     }
 
     /// Sets who may read notes by script, effective for scripts at once, not at the next save.
+    /// Turns the warnings on or off. Off, nothing scans the notes; on, they are scanned again.
+    pub fn set_warnings(&mut self, on: bool, now: f64) {
+        self.state.warnings = on;
+        self.rescan();
+        self.mark_dirty(now);
+    }
+
     pub fn set_reading(&mut self, mode: ReadMode, now: f64) {
         self.state.script_reading = mode;
         lock(&self.scripts).track(&self.state);
