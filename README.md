@@ -29,7 +29,7 @@ A small, frameless, floating scratchpad for the things you need to jot down for 
 
 ## Download
 
-**Let your agent install it.** Tell Claude Code, Codex or another AI agent: *Read https://raw.githubusercontent.com/mhavo/scrpad/main/INSTALL.md and follow it.* It downloads the latest release, checks its checksum, installs it and sets scrpad up for itself, then tells you what is left for you to do.
+**Let your agent install it.** Tell Claude Code, Codex or another AI agent: *Read https://raw.githubusercontent.com/mhavo/scrpad/main/INSTALL.md and follow it.* It downloads the latest release, checks its checksum and, when the GitHub CLI `gh` is installed and logged in, its build attestation, installs it and sets scrpad up for itself, then tells you what is left for you to do.
 
 Prebuilt binaries for Linux (x86_64, aarch64), macOS (universal app for Apple Silicon and Intel) and Windows (x86_64) are on the [Releases](https://github.com/mhavo/scrpad/releases) page. Each archive holds a single executable (on macOS, an app bundle; on Windows, `scrpad.exe` and its console twin `scrpad.com`); there is nothing to install. `SHA256SUMS` lists the checksums. Each archive also carries a build attestation: `gh attestation verify ARCHIVE --repo mhavo/scrpad` proves it was built by this repository's release workflow from the tagged commit, which a checksum served from the same release cannot. It does not prove that the commit is good.
 
