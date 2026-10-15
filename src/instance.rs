@@ -124,7 +124,7 @@ fn encode_reply(reply: &Reply) -> Vec<u8> {
         Reply::Busy => b"busy\n".to_vec(),
         Reply::Text(text) => [format!("text {}\n", text.len()).as_bytes(), text.as_bytes()].concat(),
         Reply::Warned { text, warning } => {
-            [format!("warned {} {}\n", text.len(), one_line_of(warning, "warned 16777216 ".len())).as_bytes(), text.as_bytes()].concat()
+            [format!("warned {} {}\n", text.len(), one_line_of(warning, "warned 16777216 …\n".len())).as_bytes(), text.as_bytes()].concat()
         }
         Reply::Error(message) => format!("error {}\n", one_line(message)).into_bytes(),
     }
@@ -706,6 +706,21 @@ mod tests {
             &[b'x'; 2000],
         ] {
             assert!(decode_reply(&mut &garbage[..]).is_err(), "{:?}", String::from_utf8_lossy(garbage));
+        }
+    }
+
+    #[test]
+    fn a_long_warning_is_cut_to_fit_its_line() {
+        // The longest text length leaves the least room for the warning.
+        let text = "x".repeat(MAX_TEXT);
+        for len in [1000, 1007, 1008, 1009, 1010, 1020, 1100] {
+            let reply = Reply::Warned { text: text.clone(), warning: "w".repeat(len) };
+            let encoded = encode_reply(&reply);
+            let line = encoded.iter().position(|&b| b == b'\n').unwrap() + 1;
+            assert!(line as u64 <= MAX_REPLY_LINE, "{len}: a line of {line} bytes");
+            let Some(Reply::Warned { text: got, warning }) = decode_reply(&mut &encoded[..]).unwrap() else { panic!("{len}: not warned") };
+            assert_eq!(got.len(), text.len());
+            assert!(warning == "w".repeat(len) || (warning.ends_with('…') && warning.len() < len + 3), "{len}: {}", warning.len());
         }
     }
 
