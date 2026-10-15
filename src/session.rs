@@ -656,7 +656,7 @@ impl Session {
         let readable = self.state.script_reading != ReadMode::Off
             && self.state.notes.iter().find(|n| n.id == *note).is_some_and(|n| scripts::readable(n, None));
         if readable {
-            let _ = a.reply.send(Reply::Text(text.clone()));
+            let _ = a.reply.send(scripts::flagged(&crate::cli::Command::Read(title.clone()), text.clone(), self.state.warnings));
             self.toast(now, format!("Let the agent read “{title}”"), None);
         } else {
             let message = format!("“{title}” is no longer readable");
@@ -744,14 +744,15 @@ impl Session {
         self.mark_dirty(now);
     }
 
-    /// Sets who may read notes by script, effective for scripts at once, not at the next save.
     /// Turns the warnings on or off. Off, nothing scans the notes; on, they are scanned again.
     pub fn set_warnings(&mut self, on: bool, now: f64) {
         self.state.warnings = on;
+        lock(&self.scripts).track(&self.state);
         self.rescan();
         self.mark_dirty(now);
     }
 
+    /// Sets who may read notes by script, effective for scripts at once, not at the next save.
     pub fn set_reading(&mut self, mode: ReadMode, now: f64) {
         self.state.script_reading = mode;
         lock(&self.scripts).track(&self.state);
@@ -1458,9 +1459,23 @@ mod tests {
         s.take_appends(&mut super::lock(&shared), Some(1.0));
         assert!(s.state.notes[0].text.ends_with("later"));
         s.allow(None, 2.0).unwrap();
-        assert_eq!(job.join().unwrap(), Reply::Text(INJECTED.into()));
+        let Reply::Warned { text, warning } = job.join().unwrap() else { panic!("no warning for the agent") };
+        assert_eq!(text, INJECTED);
+        assert!(warning.contains("line 2"), "{warning}");
         assert!(s.toast.as_ref().unwrap().text.contains("Let the agent read “plan”"));
         assert!(s.approval.is_none());
+    }
+
+    #[test]
+    fn an_asked_read_with_warnings_off_has_no_warning_for_the_agent() {
+        let mut s = asking(vec![note("plan", INJECTED)]);
+        s.set_warnings(false, 0.0);
+        let job = ask_and_wait(&s, Command::Read("plan".into()));
+        wait_for_approval(&mut s, 1.0);
+        let Some(super::Approval { ask: super::Ask::Read { findings, .. }, .. }) = &s.approval else { panic!() };
+        assert!(findings.is_empty());
+        s.allow(None, 2.0).unwrap();
+        assert_eq!(job.join().unwrap(), Reply::Text(INJECTED.into()));
     }
 
     #[test]

@@ -46,6 +46,12 @@ pub enum Reply {
     Ok,
     /// What `--list` and `--read` print.
     Text(String),
+    /// `Text`, with a warning for stderr from the scan of that text, made by the side that
+    /// knows whether the user has Warnings on. One line, never the text.
+    Warned {
+        text: String,
+        warning: String,
+    },
     /// Refused, and why: printed on stderr.
     Error(String),
     /// The notes file is being written by a `scrpad --append` with no window: ask again.
@@ -117,6 +123,9 @@ fn encode_reply(reply: &Reply) -> Vec<u8> {
         Reply::Ok => b"ok\n".to_vec(),
         Reply::Busy => b"busy\n".to_vec(),
         Reply::Text(text) => [format!("text {}\n", text.len()).as_bytes(), text.as_bytes()].concat(),
+        Reply::Warned { text, warning } => {
+            [format!("warned {} {}\n", text.len(), one_line_of(warning, "warned 16777216 ".len())).as_bytes(), text.as_bytes()].concat()
+        }
         Reply::Error(message) => format!("error {}\n", one_line(message)).into_bytes(),
     }
 }
@@ -132,6 +141,11 @@ fn decode_reply(stream: &mut impl BufRead) -> io::Result<Option<Reply>> {
         Some(("text", len)) => {
             let len = len.parse::<usize>().ok().filter(|&len| len <= MAX_TEXT).ok_or_else(invalid)?;
             Reply::Text(read_text(stream, len).ok_or_else(invalid)?)
+        }
+        Some(("warned", rest)) => {
+            let (len, warning) = rest.split_once(' ').ok_or_else(invalid)?;
+            let len = len.parse::<usize>().ok().filter(|&len| len <= MAX_TEXT).ok_or_else(invalid)?;
+            Reply::Warned { warning: warning.to_owned(), text: read_text(stream, len).ok_or_else(invalid)? }
         }
         _ => return Err(invalid()),
     }))
@@ -157,8 +171,13 @@ fn read_text(stream: &mut impl Read, len: usize) -> Option<String> {
 
 /// An error message as one reply line, cut short if need be.
 fn one_line(message: &str) -> String {
+    one_line_of(message, "error …\n".len())
+}
+
+/// `one_line`, leaving `reserved` bytes of the line for the rest of it.
+fn one_line_of(message: &str, reserved: usize) -> String {
     let mut line: String = message.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
-    let max = MAX_REPLY_LINE as usize - "error …\n".len();
+    let max = MAX_REPLY_LINE as usize - reserved;
     if line.len() > max {
         let cut = (0..=max).rev().find(|&i| line.is_char_boundary(i)).unwrap_or(0);
         line.truncate(cut);
@@ -346,7 +365,7 @@ pub fn serve(listener: Listener, on_command: impl Fn(Command) -> Reply + Send + 
 fn answer(stream: &Stream, on_command: impl Fn(Command) -> Reply) {
     let Some(command) = within(stream, TIMEOUT, || decode(&mut BufReader::new(stream))) else { return };
     let reply = match on_command(command) {
-        Reply::Text(text) if text.len() > MAX_TEXT => Reply::Error("the text is larger than 16 MiB".into()),
+        Reply::Text(text) | Reply::Warned { text, .. } if text.len() > MAX_TEXT => Reply::Error("the text is larger than 16 MiB".into()),
         reply => reply,
     };
     let _ = within(stream, TIMEOUT, || (&*stream).write_all(&encode_reply(&reply)));
@@ -459,9 +478,14 @@ mod tests {
 
     #[test]
     fn replies_round_trip_and_garbage_is_refused() {
-        for reply in
-            [Reply::Ok, Reply::Busy, Reply::Text(String::new()), Reply::Text("a\nb".into()), Reply::Error("“X” is encrypted".into())]
-        {
+        for reply in [
+            Reply::Ok,
+            Reply::Busy,
+            Reply::Text(String::new()),
+            Reply::Text("a\nb".into()),
+            Reply::Warned { text: "a\nb".into(), warning: "scrpad: warning: x".into() },
+            Reply::Error("“X” is encrypted".into()),
+        ] {
             assert_eq!(decode_reply(&mut &encode_reply(&reply)[..]).unwrap(), Some(reply));
         }
         assert_eq!(decode_reply(&mut &b""[..]).unwrap(), None);
