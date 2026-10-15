@@ -353,12 +353,14 @@ pub fn risky_reason(name: &str) -> Option<&'static str> {
 }
 
 /// A bare program name resolved against this process's `PATH`; a name with a separator is left
-/// as given, and so is one that is not found (the start then reports it).
-fn resolve_program(program: &str) -> PathBuf {
+/// as given. A bare name that is not found is an error: it must not be looked up again in the
+/// note's `PATH`.
+fn resolve_program(program: &str) -> Result<PathBuf, String> {
     if program.contains(['/', std::path::MAIN_SEPARATOR]) {
-        return PathBuf::from(program);
+        return Ok(PathBuf::from(program));
     }
-    let Some(path) = std::env::var_os("PATH") else { return PathBuf::from(program) };
+    let not_found = || format!("{program} not found on PATH");
+    let path = std::env::var_os("PATH").ok_or_else(not_found)?;
     #[cfg(windows)]
     let extensions: Vec<String> =
         std::env::var("PATHEXT").unwrap_or(".COM;.EXE;.BAT;.CMD".into()).split(';').map(str::to_owned).chain([String::new()]).collect();
@@ -368,11 +370,11 @@ fn resolve_program(program: &str) -> PathBuf {
         for ext in &extensions {
             let candidate = dir.join(format!("{program}{ext}"));
             if is_executable(&candidate) {
-                return candidate;
+                return Ok(candidate);
             }
         }
     }
-    PathBuf::from(program)
+    Err(not_found())
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -387,7 +389,14 @@ fn is_executable(path: &Path) -> bool {
 /// exit code (on Unix 128 + the signal that ended it, 127 if it could not start).
 pub fn run_child(argv: &[String], env: &[(String, String)]) -> i32 {
     let Some((program, args)) = argv.split_first() else { return 2 };
-    let status = std::process::Command::new(resolve_program(program)).args(args).envs(env.iter().map(|(k, v)| (k, v))).status();
+    let program_path = match resolve_program(program) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("scrpad: {e}");
+            return 127;
+        }
+    };
+    let status = std::process::Command::new(program_path).args(args).envs(env.iter().map(|(k, v)| (k, v))).status();
     match status {
         Ok(status) => {
             #[cfg(unix)]
@@ -658,6 +667,11 @@ mod tests {
         let env = [("PATH".to_owned(), dir.display().to_string())];
         // The real `sh` runs, though the note's PATH holds only the planted one.
         assert_eq!(run_child(&["sh".into(), "-c".into(), "exit 7".into()], &env), 7);
+        // A name only the note's PATH could find is refused, not run.
+        std::fs::write(dir.join("only-in-note"), "#!/bin/sh\nexit 99\n").unwrap();
+        std::fs::set_permissions(dir.join("only-in-note"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(run_child(&["only-in-note".into()], &env), 127);
+        assert!(resolve_program("only-in-note").unwrap_err().contains("only-in-note not found on PATH"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
