@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 pub use term::run;
 
 use crate::crypto;
-use crate::session::{Session, ToastAction, lock};
+use crate::session::{Eye, Session, ToastAction, lock};
 use crate::store::ReadMode;
 use editor::{Editor, Move};
 
@@ -80,6 +80,7 @@ enum Action {
     Menu,
     AutoLock,
     AutoRehide,
+    KeepVisible,
     Warnings,
     ScriptsRead(ReadMode),
     Quit,
@@ -320,11 +321,19 @@ impl Tui {
                 self.session.clear(now);
             }
             Action::Copy => self.copy(now),
+            Action::KeepVisible => {
+                let id = self.session.state.current().id;
+                self.session.keep_visible(id, now);
+            }
             Action::UndoToast => {
-                if self.session.toast.as_ref().is_some_and(|t| matches!(t.action, Some(ToastAction::Undo(_))))
-                    && let Some(ToastAction::Undo(undo)) = self.session.toast.take().and_then(|t| t.action)
+                if self.session.toast.as_ref().is_some_and(|t| matches!(t.action, Some(ToastAction::Undo(_) | ToastAction::KeepVisible(_))))
+                    && let Some(action) = self.session.toast.take().and_then(|t| t.action)
                 {
-                    self.session.undo(undo, now);
+                    match action {
+                        ToastAction::Undo(undo) => self.session.undo(undo, now),
+                        ToastAction::KeepVisible(id) => self.session.keep_visible(id, now),
+                        ToastAction::Open(_) => {}
+                    }
                     self.unsaved.insert(self.session.state.current().id);
                 }
             }
@@ -620,8 +629,15 @@ impl Tui {
         let s = &self.session;
         let note = s.state.current();
         let mut items = vec![MenuItem::new("Rename note", "F2", Action::Rename), MenuItem::new("Close note", "Ctrl+W", Action::Close)];
-        let hide = if note.hidden { "Show note" } else { "Hide note" };
+        let hide = match s.eye() {
+            Eye::Visible => "Hide note",
+            Eye::Hidden => "Show note for now",
+            Eye::Revealed => "Hide note again",
+        };
         items.push(MenuItem::new(hide, "Alt+H", Action::Hide));
+        if s.eye() != Eye::Visible {
+            items.push(MenuItem::new("Keep this note visible", "", Action::KeepVisible));
+        }
         if note.is_encrypted() {
             let label = if s.showing_cipher() { "Show the text" } else { "Show encrypted text" };
             items.push(MenuItem::new(label, "Ctrl+E", Action::Cipher));
@@ -792,10 +808,10 @@ impl Tui {
             return None;
         }
         let editor = self.editors.entry(note.id).or_insert_with(|| Editor::new(&note.text));
-        let at = editor.draw(&note.text, note.hidden, area, frame.buffer_mut(), Style::new());
+        let masked = self.session.is_masked(note);
+        let at = editor.draw(&note.text, masked, area, frame.buffer_mut(), Style::new());
         if note.text.is_empty() {
-            let hint =
-                if note.hidden { Line::styled("hidden", style::MUTED).right_aligned() } else { Line::styled(PLACEHOLDER, style::MUTED) };
+            let hint = if masked { Line::styled("hidden", style::MUTED).right_aligned() } else { Line::styled(PLACEHOLDER, style::MUTED) };
             frame.render_widget(hint, Rect { height: 1, ..area });
         }
         Some(at)
@@ -805,8 +821,10 @@ impl Tui {
     fn status(&self, frame: &mut Frame, area: Rect) {
         let line = if let Some(toast) = &self.session.toast {
             let mut spans = vec![Span::raw(" "), Span::raw(toast.text.as_str())];
-            if let Some(ToastAction::Undo(_)) = &toast.action {
-                spans.extend([Span::styled(" · ", style::MUTED), Span::styled("Alt+U Undo", style::ACCENT)]);
+            if let Some(action) = &toast.action
+                && !matches!(action, ToastAction::Open(_))
+            {
+                spans.extend([Span::styled(" · ", style::MUTED), Span::styled(format!("Alt+U {}", action.label()), style::ACCENT)]);
             }
             Line::from(spans)
         } else {
@@ -817,7 +835,7 @@ impl Tui {
                 (true, false) => "lock",
                 (true, true) => "unlock",
             };
-            let hide = if note.hidden { "show" } else { "hide" };
+            let hide = if self.session.is_masked(note) { "show" } else { "hide" };
             let keys = [("^N", "new"), ("M-h", hide), ("^L", lock), ("^Y", "copy"), ("^Q", "quit"), ("F10", "menu"), ("F1", "keys")];
             let mut spans = vec![];
             let mut used = 0;

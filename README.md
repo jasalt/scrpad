@@ -60,7 +60,7 @@ On Linux, rendering goes through wgpu, so you need working Vulkan or OpenGL driv
 | Rename | double-click the tab, or `…` → Rename note | F2 |
 | Switch note | click | Ctrl+Tab / Ctrl+Shift+Tab |
 | Reorder notes | drag a tab sideways | |
-| Hide/show content | eye icon | Ctrl+Shift+H |
+| Hide, reveal, hide again | eye icon | Ctrl+Shift+H |
 | Encrypt / lock note | lock icon | Ctrl+Shift+L |
 | Lock all encrypted notes | `…` → Lock all | Ctrl+Shift+K |
 | Lock and hide again when stepping away (both on by default, below) | `…` → Lock encrypted notes automatically, Hide notes again automatically | |
@@ -264,7 +264,15 @@ The window's shortcuts lose their Shift here: most terminals can't tell Ctrl+Shi
 
 ## Hiding and encryption
 
-**Hiding** (eye icon) only masks the content on screen, against screenshots and shoulder surfing. A hidden note is still stored as plain text.
+**Hiding** (eye icon) only masks the content on screen, against screenshots and shoulder surfing. A hidden note is still stored as plain text. The eye has three states:
+
+| State | Text on screen | Scripts (`--list`, `--read`) | Icon |
+|---|---|---|---|
+| Visible | shown | as any note | eye |
+| Hidden | masked | never | crossed-out eye |
+| Revealed | shown, for now | never | eye, tinted |
+
+A note is Visible by default; hiding it is one click and is never asked about. Clicking the eye (Ctrl+Shift+H) goes Visible → Hidden → Revealed → Hidden: peeking at a hidden note and hiding it again are one click each, and the click never makes it a plain note. A Revealed note is still a hidden note: no script can read it, it is saved as hidden, and after a restart it starts Hidden. The one way back to a plain note is *Keep visible*, on the toast shown when you reveal it or in `…` → *Keep this note visible* (also from Hidden); its toast offers Undo, which puts the note back to Revealed.
 
 **Encryption** (lock icon, next to the eye) protects the note on disk:
 
@@ -293,7 +301,7 @@ This keeps notes out of a careless share or recording. It is not protection agai
 **Stepping away.** Two options in the `…` menu, both on by default, act when the window is hidden (Ctrl+H, `scrpad --toggle`) and after 5 minutes without keyboard or mouse input:
 
 - *Lock encrypted notes automatically* locks every unlocked encrypted note, exactly like the lock button: what was typed is encrypted and saved first, then the text, password and undo history leave memory. `…` → Lock all (Ctrl+Shift+K) does the same right away, whatever the option says.
-- *Hide notes again automatically* hides again the hidden notes you revealed with the eye, so revealing one is only for the moment. Notes you never hid stay as they are.
+- *Hide notes again automatically* hides again the notes you revealed with the eye, so revealing one is only for the moment. Notes you never hid stay as they are. With it off, a revealed note stays shown on screen until you hide it, but it is still hidden for scripts and on disk, and a restart starts it Hidden.
 
 The idle timer runs while the window is drawn. On Wayland a window that is not visible (on another workspace, say) may get no frames; the idle lock then happens at the latest on the first frame it draws again, before any text is shown.
 

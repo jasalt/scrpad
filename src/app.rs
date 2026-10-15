@@ -10,7 +10,7 @@ use crate::clipboard;
 use crate::crypto;
 use crate::icons;
 use crate::instance::Reply;
-use crate::session::{Session, ToastAction, lock};
+use crate::session::{Eye, Session, ToastAction, lock};
 use crate::store::{FontStyle, Note, ReadMode, State};
 use crate::theme::{self, ThemeKind, Tokens};
 use zeroize::{Zeroize, Zeroizing};
@@ -244,7 +244,7 @@ impl App {
     /// same reason notes are locked and hidden again right here, not on a later frame.
     pub fn hide_window(&mut self, ctx: &egui::Context) {
         self.popup = None;
-        self.session.step_away(ctx.input(|i| i.time));
+        self.session.step_away();
         if self.session.dirty_since.is_some() && !self.session.save_now() {
             // Kept dirty and retried on the next frame, as after any failed save.
             ctx.request_repaint();
@@ -802,7 +802,7 @@ impl App {
         };
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
         child.set_clip_rect(rect.intersect(ui.clip_rect()));
-        let hidden = self.session.state.current().hidden;
+        let hidden = self.session.is_masked(self.session.state.current());
         let focus = std::mem::take(&mut self.session.focus_editor);
         let placeholder = egui::RichText::new("Type anything. It saves by itself.").color(t.placeholder).font(font.clone());
         let mut changed = false;
@@ -945,14 +945,12 @@ impl App {
             self.toggle_popup(Popup::Font, aa);
         }
         x += 40.0;
-        let hidden = self.session.state.current().hidden;
         let eye = Rect::from_center_size(Pos2::new(x, y), size);
-        let (name, tip) = match (hidden, self.session.state.auto_rehide) {
-            (true, true) => ("eye-off", "Show note until the window hides or sits idle (Ctrl+Shift+H)"),
-            (true, false) => ("eye-off", "Show note (Ctrl+Shift+H)"),
-            (false, _) => ("eye", "Hide note (Ctrl+Shift+H)"),
+        let (name, tip, tint) = match self.session.eye() {
+            Eye::Visible => ("eye", "Hide note (Ctrl+Shift+H)", t.icon_faint),
+            Eye::Hidden => ("eye-off", "Show note for now (Ctrl+Shift+H)", t.accent),
+            Eye::Revealed => ("eye", "Hide note again (Ctrl+Shift+H)", t.accent),
         };
-        let tint = if hidden { t.accent } else { t.icon_faint };
         if icon_button(ui, eye, name, 20.0, tint, t, "Hide note").on_hover_text(tip).clicked() {
             self.session.toggle_hidden(now);
         }
@@ -1137,6 +1135,11 @@ impl App {
             self.close_note(self.session.state.active, now);
             self.popup = None;
         }
+        if self.session.eye() != Eye::Visible && menu_item(ui, t, "Keep this note visible", "", false).clicked() {
+            let id = self.session.state.current().id;
+            self.session.keep_visible(id, now);
+            self.popup = None;
+        }
         let note = self.session.state.current();
         if note.is_encrypted() && menu_item(ui, t, "Show encrypted text", "Ctrl+Shift+E", self.session.showing_cipher()).clicked() {
             self.session.toggle_cipher_view(now);
@@ -1250,6 +1253,7 @@ impl App {
             if resp.clicked() {
                 match self.session.toast.take().and_then(|t| t.action) {
                     Some(ToastAction::Undo(undo)) => self.session.undo(undo, now),
+                    Some(ToastAction::KeepVisible(id)) => self.session.keep_visible(id, now),
                     Some(ToastAction::Open(url)) => ui.ctx().open_url(egui::OpenUrl::new_tab(url)),
                     None => {}
                 }

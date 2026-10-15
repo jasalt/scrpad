@@ -3,6 +3,7 @@
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use scrpad::App;
+use scrpad::session::Eye;
 use scrpad::store::{Note, ReadMode, State};
 use std::sync::{Mutex, MutexGuard};
 
@@ -424,9 +425,9 @@ fn revealed_notes_hide_again_with_the_window() {
     // Revealing is temporary: hiding the window hides the note again. Note 0 was never hidden.
     h.get_by_label("Hide note").click();
     h.run_steps(2);
-    assert!(!h.state().session.state.notes[1].hidden);
+    assert_eq!(h.state().session.eye(), Eye::Revealed);
     press_ctrl_h(&mut h);
-    assert!(h.state().session.state.notes[1].hidden);
+    assert_eq!(h.state().session.eye(), Eye::Hidden);
     assert!(!h.state().session.state.notes[0].hidden);
     // With the option off it stays revealed.
     h.state_mut().session.state.auto_rehide = false;
@@ -434,7 +435,55 @@ fn revealed_notes_hide_again_with_the_window() {
     h.get_by_label("Hide note").click();
     h.run_steps(2);
     press_ctrl_h(&mut h);
-    assert!(!h.state().session.state.notes[1].hidden);
+    assert_eq!(h.state().session.eye(), Eye::Revealed);
+    // Still a hidden note for scripts and on disk.
+    assert!(h.state().session.state.notes[1].hidden);
+}
+
+#[test]
+fn the_eye_has_three_states_with_their_tooltips_and_a_keep_visible_toast() {
+    let _guard = ui_test_guard();
+    let mut h = harness(sample());
+    let tip = |h: &mut Harness<'_, App>, text: &str| {
+        h.get_by_label("Hide note").hover();
+        h.run_steps(8);
+        assert!(h.query_by_label(text).is_some(), "no tooltip {text}");
+    };
+    tip(&mut h, "Hide note (Ctrl+Shift+H)");
+    h.get_by_label("Hide note").click();
+    h.run_steps(2);
+    assert_eq!(h.state().session.eye(), Eye::Hidden);
+    tip(&mut h, "Show note for now (Ctrl+Shift+H)");
+    // Revealing says so, and offers the one way to a plain note.
+    h.get_by_label("Hide note").click();
+    h.run_steps(2);
+    assert_eq!(h.state().session.eye(), Eye::Revealed);
+    tip(&mut h, "Hide note again (Ctrl+Shift+H)");
+    h.get_by_label("Keep visible").click();
+    h.run_steps(2);
+    assert_eq!(h.state().session.eye(), Eye::Visible);
+    assert!(!h.state().session.state.current().hidden);
+    h.get_by_label("Undo").click();
+    h.run_steps(2);
+    assert_eq!(h.state().session.eye(), Eye::Revealed);
+}
+
+#[test]
+fn keep_this_note_visible_is_in_the_menu_for_a_hidden_note_only() {
+    let _guard = ui_test_guard();
+    let mut h = harness(sample());
+    h.get_by_label("More").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Keep this note visible").is_none());
+    h.get_by_label("More").click();
+    h.run_steps(2);
+    h.get_by_label("Hide note").click();
+    h.run_steps(2);
+    h.get_by_label("More").click();
+    h.run_steps(2);
+    h.get_by_label("Keep this note visible").click();
+    h.run_steps(2);
+    assert_eq!(h.state().session.eye(), Eye::Visible);
 }
 
 #[test]

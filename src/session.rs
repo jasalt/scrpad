@@ -50,6 +50,19 @@ pub(crate) enum Undo {
         index: usize,
         note: Note,
     },
+    /// A plain note made hidden-and-shown again: back to Revealed.
+    Unhidden {
+        id: u64,
+    },
+}
+
+/// The three states of the eye. Only `Visible` is a plain note.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Eye {
+    Visible,
+    Hidden,
+    /// A hidden note shown for now: still hidden for scripts and on disk.
+    Revealed,
 }
 
 pub(crate) struct Toast {
@@ -61,6 +74,8 @@ pub(crate) struct Toast {
 /// The button a toast can carry.
 pub(crate) enum ToastAction {
     Undo(Undo),
+    /// Makes the revealed note with this id a plain note.
+    KeepVisible(u64),
     /// Opens a release page in the browser.
     Open(String),
 }
@@ -71,6 +86,7 @@ impl Undo {
         match self {
             Undo::Cleared { password, .. } => password.is_some(),
             Undo::Closed { note, .. } => note.is_encrypted() && !note.is_locked(),
+            Undo::Unhidden { .. } => false,
         }
     }
 }
@@ -79,6 +95,7 @@ impl ToastAction {
     pub(crate) fn label(&self) -> &'static str {
         match self {
             ToastAction::Undo(_) => "Undo",
+            ToastAction::KeepVisible(_) => "Keep visible",
             ToastAction::Open(_) => "Download",
         }
     }
@@ -898,16 +915,53 @@ impl Session {
         self.mark_dirty(now);
     }
 
+    /// The open note's eye.
+    pub fn eye(&self) -> Eye {
+        let note = self.state.current();
+        match (note.hidden, self.revealed.contains(&note.id)) {
+            (false, _) => Eye::Visible,
+            (true, false) => Eye::Hidden,
+            (true, true) => Eye::Revealed,
+        }
+    }
+
+    /// Whether the note's text is masked on screen: hidden and not revealed.
+    pub fn is_masked(&self, note: &Note) -> bool {
+        note.hidden && !self.revealed.contains(&note.id)
+    }
+
+    /// The eye: Visible -> Hidden -> Revealed -> Hidden. Never makes a note plain; that is
+    /// `keep_visible`. Revealed is session state: `hidden` stays set, so scripts and the file
+    /// keep treating the note as hidden.
     pub fn toggle_hidden(&mut self, now: f64) {
         let note = self.state.current_mut();
-        note.hidden = !note.hidden;
-        let (id, hidden) = (note.id, note.hidden);
-        if hidden {
+        let (id, was_hidden) = (note.id, note.hidden);
+        if !was_hidden {
+            note.hidden = true;
             self.revealed.remove(&id);
+        } else if self.revealed.remove(&id) {
+            // Revealed -> Hidden.
         } else {
             self.revealed.insert(id);
+            let msg = format!("Showing “{}” for now", self.state.current().title);
+            self.toast = Some(Toast { text: msg, until: now + TOAST_SECS, action: Some(ToastAction::KeepVisible(id)) });
         }
+        lock(&self.scripts).track(&self.state);
         self.drop_unreadable_read(Some(now));
+        self.mark_dirty(now);
+    }
+
+    /// Makes a hidden or revealed note a plain one, the one way a hidden note becomes plain.
+    pub fn keep_visible(&mut self, id: u64, now: f64) {
+        let Some(note) = self.state.notes.iter_mut().find(|n| n.id == id) else { return };
+        if !note.hidden {
+            return;
+        }
+        note.hidden = false;
+        let msg = format!("“{}” is a plain note now", note.title);
+        self.revealed.remove(&id);
+        self.toast(now, msg, Some(Undo::Unhidden { id }));
+        lock(&self.scripts).track(&self.state);
         self.mark_dirty(now);
     }
 
@@ -961,20 +1015,11 @@ impl Session {
 
     /// The user stepped away (the window hides, or no input for `IDLE_SECS`): locks encrypted
     /// notes and hides revealed ones again, as the options ask. Returns how many notes it locked.
-    pub(crate) fn step_away(&mut self, now: f64) -> usize {
+    pub(crate) fn step_away(&mut self) -> usize {
         let locked = if self.state.auto_lock { self.lock_all() } else { 0 };
+        // `hidden` stayed set while revealed: forgetting the reveal masks the note again.
         if self.state.auto_rehide {
-            let mut rehidden = false;
-            for note in &mut self.state.notes {
-                if self.revealed.remove(&note.id) && !note.hidden {
-                    note.hidden = true;
-                    rehidden = true;
-                }
-            }
             self.revealed.clear();
-            if rehidden {
-                self.mark_dirty(now);
-            }
         }
         locked
     }
@@ -983,7 +1028,7 @@ impl Session {
     fn exposed(&self) -> bool {
         let notes = &self.state.notes;
         self.state.auto_lock && notes.iter().any(|n| n.is_encrypted() && !n.is_locked())
-            || self.state.auto_rehide && notes.iter().any(|n| !n.hidden && self.revealed.contains(&n.id))
+            || self.state.auto_rehide && notes.iter().any(|n| self.revealed.contains(&n.id))
     }
 
     /// Steps away after `IDLE_SECS` without input. Runs before anything is drawn, so a window
@@ -992,7 +1037,7 @@ impl Session {
         if now - self.last_input >= IDLE_SECS && self.exposed() {
             // Counted from here on: a note that could not be sealed is retried later, not every frame.
             self.last_input = now;
-            if self.step_away(now) > 0 {
+            if self.step_away() > 0 {
                 self.toast(now, "Locked after 5 minutes without input", None);
             }
         }
@@ -1190,6 +1235,14 @@ impl Session {
                     self.state.active = self.state.notes.len() - 1;
                 }
             },
+            Undo::Unhidden { id } => {
+                if let Some(note) = self.state.notes.iter_mut().find(|n| n.id == id) {
+                    note.hidden = true;
+                    self.revealed.insert(id);
+                    lock(&self.scripts).track(&self.state);
+                    self.drop_unreadable_read(Some(now));
+                }
+            }
             Undo::Closed { index, note } => {
                 let index = index.min(self.state.notes.len());
                 // Closing the last note left an empty placeholder: replace it.
@@ -1282,7 +1335,7 @@ pub(crate) fn lock(window: &Mutex<scripts::Window>) -> MutexGuard<'_, scripts::W
 
 #[cfg(test)]
 mod tests {
-    use super::{APPROVAL_GRACE, APPROVAL_WAIT, Ask, RUN_CHANGED, RunShown, SealJob, Session, spawn_sealer};
+    use super::{APPROVAL_GRACE, APPROVAL_WAIT, Ask, Eye, RUN_CHANGED, RunShown, SealJob, Session, spawn_sealer};
     use crate::cli::Command;
     use crate::instance::Reply;
     use crate::store::{Note, ReadMode, State};
@@ -1617,11 +1670,117 @@ mod tests {
         assert!(session.open_note_is_secret());
         // Revealed with the eye, it is still a hidden note shown for a while.
         session.toggle_hidden(2.0);
-        assert!(!session.state.current().hidden);
+        assert_eq!(session.eye(), Eye::Revealed);
+        assert!(session.state.current().hidden);
         assert!(session.open_note_is_secret());
         let mut session = Session::new(State::default(), None, None, Arc::new(|_| {}));
         session.encrypt_note("pw", 1.0).unwrap();
         assert!(session.open_note_is_secret());
+    }
+
+    fn eye_session(name: &str) -> (Session, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("scrpad-eye-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = State { notes: vec![note("key", "sk-live-TOKEN")], script_reading: ReadMode::Always, ..State::default() };
+        (Session::new(state, Some(dir.join("notes.json")), None, Arc::new(|_| {})), dir)
+    }
+
+    #[test]
+    fn the_eye_cycles_visible_hidden_revealed_hidden_and_never_back_to_visible() {
+        let mut s = session_with(vec![note("a", "x")]);
+        assert_eq!(s.eye(), Eye::Visible);
+        for expected in [Eye::Hidden, Eye::Revealed, Eye::Hidden, Eye::Revealed, Eye::Hidden] {
+            s.toggle_hidden(1.0);
+            assert_eq!(s.eye(), expected);
+            assert_ne!(s.eye() == Eye::Visible, s.state.current().hidden);
+        }
+        assert!(s.is_masked(s.state.current()));
+        s.toggle_hidden(1.0);
+        assert!(!s.is_masked(s.state.current()));
+    }
+
+    #[test]
+    fn revealing_offers_keep_visible_in_the_toast() {
+        let mut s = session_with(vec![note("key", "x")]);
+        s.toggle_hidden(1.0);
+        s.toggle_hidden(2.0);
+        let toast = s.toast.as_ref().unwrap();
+        assert_eq!(toast.text, "Showing “key” for now");
+        assert!(matches!(toast.action, Some(super::ToastAction::KeepVisible(id)) if id == s.state.current().id));
+        assert_eq!(toast.action.as_ref().unwrap().label(), "Keep visible");
+    }
+
+    #[test]
+    fn a_revealed_note_stays_out_of_scripts_in_the_window_and_in_the_file() {
+        let (mut s, dir) = eye_session("revealed");
+        let server = s.script_server();
+        let (list, read) = (Command::List, Command::Read("key".into()));
+        // A plain note is read as any note.
+        assert!(s.save_now());
+        assert_eq!(server(&read), Reply::Text("sk-live-TOKEN".into()));
+        s.toggle_hidden(1.0);
+        s.toggle_hidden(2.0);
+        assert_eq!(s.eye(), Eye::Revealed);
+        // From the window, before any save, and from the file after it.
+        let refused = |reply: &Reply| matches!(reply, Reply::Error(_));
+        assert!(refused(&server(&read)));
+        assert_eq!(server(&list), Reply::Text(String::new()));
+        assert!(s.save_now());
+        let json = std::fs::read_to_string(dir.join("notes.json")).unwrap();
+        assert!(json.contains("\"hidden\": true"), "{json}");
+        assert!(refused(&crate::scripts::answer(Some(&dir.join("notes.json")), &read, None)));
+        assert_eq!(crate::scripts::answer(Some(&dir.join("notes.json")), &list, None), Reply::Text(String::new()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn keep_visible_makes_the_note_readable_and_undo_takes_that_back() {
+        let (mut s, dir) = eye_session("keep");
+        let server = s.script_server();
+        let read = Command::Read("key".into());
+        s.toggle_hidden(1.0);
+        s.toggle_hidden(2.0);
+        let id = s.state.current().id;
+        s.keep_visible(id, 3.0);
+        assert_eq!(s.eye(), Eye::Visible);
+        assert_eq!(s.toast.as_ref().unwrap().text, "“key” is a plain note now");
+        assert!(s.save_now());
+        assert_eq!(server(&read), Reply::Text("sk-live-TOKEN".into()));
+        let Some(super::ToastAction::Undo(undo)) = s.toast.take().and_then(|t| t.action) else { panic!("no Undo") };
+        s.undo(undo, 4.0);
+        assert_eq!(s.eye(), Eye::Revealed);
+        assert!(matches!(server(&read), Reply::Error(_)));
+        // From Hidden it goes straight to Visible.
+        s.toggle_hidden(5.0);
+        assert_eq!(s.eye(), Eye::Hidden);
+        s.keep_visible(id, 6.0);
+        assert_eq!(s.eye(), Eye::Visible);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn idle_hides_a_revealed_note_again_only_with_the_option_on() {
+        for on in [true, false] {
+            let state = State { auto_rehide: on, auto_lock: false, ..State::default() };
+            let mut s = Session::new(state, None, None, Arc::new(|_| {}));
+            s.toggle_hidden(1.0);
+            s.toggle_hidden(1.0);
+            assert_eq!(s.eye(), Eye::Revealed);
+            s.check_idle(10.0 * super::IDLE_SECS, false);
+            assert_eq!(s.eye(), if on { Eye::Hidden } else { Eye::Revealed });
+            assert!(s.state.current().hidden);
+        }
+    }
+
+    #[test]
+    fn a_revealed_note_starts_hidden_after_a_restart() {
+        let (mut s, dir) = eye_session("restart");
+        s.toggle_hidden(1.0);
+        s.toggle_hidden(2.0);
+        assert!(s.save_now());
+        let loaded = Session::new(State::load(&dir.join("notes.json")).unwrap(), None, None, Arc::new(|_| {}));
+        assert_eq!(loaded.eye(), Eye::Hidden);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1664,11 +1823,12 @@ mod tests {
         state.active = 1;
         let mut session = Session::new(state, None, None, Arc::new(|_| {}));
         session.toggle_hidden(1.0);
-        assert!(!session.state.notes[1].hidden);
+        assert_eq!(session.eye(), Eye::Revealed);
         session.check_idle(super::IDLE_SECS - 1.0, false);
-        assert!(!session.state.notes[0].is_locked() && !session.state.notes[1].hidden);
+        assert!(!session.state.notes[0].is_locked() && session.eye() == Eye::Revealed);
         session.check_idle(super::IDLE_SECS + 1.0, false);
         assert!(session.state.notes[0].is_locked() && session.state.notes[0].text.is_empty());
+        assert_eq!(session.eye(), Eye::Hidden);
         assert!(session.state.notes[1].hidden);
         // Never hidden by the user: left alone.
         assert!(!session.state.notes[2].hidden);
@@ -1683,7 +1843,9 @@ mod tests {
         let mut session = Session::new(state, None, None, Arc::new(|_| {}));
         session.toggle_hidden(1.0);
         session.check_idle(10.0 * super::IDLE_SECS, false);
-        assert!(!session.state.notes[0].is_locked() && !session.state.notes[0].hidden);
+        // A revealed note stays shown on screen, and is still hidden for scripts and on disk.
+        assert!(!session.state.notes[0].is_locked() && session.eye() == Eye::Revealed);
+        assert!(session.state.notes[0].hidden);
     }
 
     #[test]

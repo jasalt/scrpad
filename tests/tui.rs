@@ -7,6 +7,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use scrpad::Session;
+use scrpad::session::Eye;
 use scrpad::store::{Note, ReadMode, State};
 use scrpad::tui::Tui;
 
@@ -157,10 +158,38 @@ fn a_hidden_note_shows_a_mask_until_revealed() {
     let rows: Vec<&str> = screen.lines().skip(2).take(2).map(str::trim).collect();
     assert_eq!(rows, ["•••••••", "••"], "{screen}");
     s.alt('h');
-    assert!(!s.current().hidden);
+    assert_eq!(s.tui.session.eye(), Eye::Revealed);
     assert!(s.text().contains("hunter2"));
     s.alt('h');
     assert!(!s.text().contains("hunter2"));
+}
+
+#[test]
+fn the_eye_has_three_states_in_the_status_line_menu_and_toast() {
+    let mut s = Screen::new(sample(), None);
+    assert!(s.text().contains("M-h hide"));
+    s.alt('h');
+    assert_eq!(s.tui.session.eye(), Eye::Hidden);
+    assert!(s.text().contains("M-h show"));
+    // Revealing says so and offers Keep visible on the toast key.
+    s.alt('h');
+    let screen = s.text();
+    assert!(screen.contains("Showing “") && screen.contains("for now · Alt+U Keep visible"), "{screen}");
+    s.key(KeyCode::F(10), KeyModifiers::NONE);
+    let menu = s.text();
+    assert!(menu.contains("Hide note again") && menu.contains("Keep this note visible"), "{menu}");
+    s.press(KeyCode::Esc);
+    s.alt('u');
+    assert_eq!(s.tui.session.eye(), Eye::Visible);
+    assert!(s.text().contains("is a plain note now · Alt+U Undo"));
+    s.alt('u');
+    assert_eq!(s.tui.session.eye(), Eye::Revealed);
+    // Plain, the menu has no such item.
+    let id = s.current().id;
+    s.tui.session.keep_visible(id, 1.0);
+    s.key(KeyCode::F(10), KeyModifiers::NONE);
+    let menu = s.text();
+    assert!(menu.contains("Hide note") && !menu.contains("Keep this note visible"), "{menu}");
 }
 
 #[test]
