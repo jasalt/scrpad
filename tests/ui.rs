@@ -762,13 +762,9 @@ fn an_agent_request_asks_first_and_writes_only_when_allowed() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-#[test]
-fn a_run_request_shows_the_command_and_deny_refuses_it() {
-    let _guard = ui_test_guard();
-    let mut state = sample();
-    state.notes[1].title = ".env".into();
-    state.notes[1].text = "API_KEY=<fill in>".into();
-    let mut h = harness(state);
+/// Asks `--run` of the note titled `.env` as another launch would, and waits until the buttons
+/// may answer.
+fn ask_run(h: &mut Harness<'_, App>) -> std::thread::JoinHandle<scrpad::instance::Reply> {
     let server = h.state().session.approval_server();
     let argv = ["npm", "run", "dev"].map(String::from).to_vec();
     let job = std::thread::spawn(move || server(&scrpad::cli::Command::Run { title: ".env".into(), argv }));
@@ -779,16 +775,91 @@ fn a_run_request_shows_the_command_and_deny_refuses_it() {
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    wait_until_answerable(h);
+    job
+}
+
+fn wait_until_answerable(h: &mut Harness<'_, App>) {
     while !h.state().session.approval_ready(h.ctx.input(|i| i.time)) {
         h.run_steps(1);
     }
     h.run_steps(2);
+}
+
+#[test]
+fn a_run_request_shows_the_command_and_its_variable_names_and_deny_refuses_it() {
+    let _guard = ui_test_guard();
+    let mut state = sample();
+    state.notes[1].title = ".env".into();
+    state.notes[1].text = "API_KEY=<fill in>\nDATABASE_URL=postgres://localhost/dev\nHTTPS_PROXY=http://proxy.invalid".into();
+    state.run_names.insert(".env".into(), vec!["API_KEY".into(), "DATABASE_URL".into()]);
+    let mut h = harness(state);
+    let job = ask_run(&mut h);
     h.get_by_label_contains("npm run dev");
+    h.get_by_label("Sets 3 variables: API_KEY, DATABASE_URL, HTTPS_PROXY");
+    h.get_by_label("New since you last allowed: HTTPS_PROXY");
+    h.get_by_label("HTTPS_PROXY: sends traffic through another server");
+    assert!(h.query_by_label_contains("proxy.invalid").is_none() && h.query_by_label_contains("fill in").is_none(), "never a value");
     shot(&mut h, "approval-run");
     h.get_by_label("Deny").click();
     h.run_steps(3);
     assert!(h.state().session.approval.is_none());
     assert!(matches!(job.join().unwrap(), scrpad::instance::Reply::Error(e) if e.contains("denied")));
+
+    // With the warnings off the names and the new name stay; the reason goes.
+    h.state_mut().session.set_warnings(false, 0.0);
+    let job = ask_run(&mut h);
+    h.get_by_label("Sets 3 variables: API_KEY, DATABASE_URL, HTTPS_PROXY");
+    h.get_by_label("New since you last allowed: HTTPS_PROXY");
+    assert!(h.query_by_label_contains("sends traffic").is_none());
+    h.get_by_label("Allow").click();
+    h.run_steps(3);
+    assert!(matches!(job.join().unwrap(), scrpad::instance::Reply::Text(_)));
+    assert_eq!(h.state().session.state.run_names[".env"], ["API_KEY", "DATABASE_URL", "HTTPS_PROXY"]);
+
+    // A note never allowed before says so.
+    h.state_mut().session.state.run_names.clear();
+    let job = ask_run(&mut h);
+    h.get_by_label("First time for this note");
+    h.get_by_label("Deny").click();
+    h.run_steps(3);
+    job.join().unwrap();
+}
+
+#[test]
+fn a_locked_run_shows_the_names_after_the_password_and_hands_over_on_the_second_allow() {
+    let _guard = ui_test_guard();
+    let dir = std::env::temp_dir().join(format!("scrpad-ui-run-locked-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("notes.json");
+    let mut state = sample();
+    state.active = 0;
+    state.notes[1].title = ".env".into();
+    state.notes[1].text = "SECRET_NAME_XYZ=sk-live".into();
+    state.notes[1].encrypt("pw").unwrap();
+    state.notes[1].lock();
+    let mut h = harness_at(state, Some(path.clone()));
+    let job = ask_run(&mut h);
+    assert!(h.query_by_label_contains("SECRET_NAME_XYZ").is_none(), "no names before the password");
+    h.get_by_label("Password of the note").click();
+    h.run_steps(1);
+    h.get_by_label("Password of the note").type_text("pw");
+    h.get_by_label("Allow").click();
+    h.run_steps(2);
+    h.get_by_label("Sets 1 variable: SECRET_NAME_XYZ");
+    h.get_by_label("First time for this note");
+    assert!(h.query_by_label("Password of the note").is_none());
+    assert!(!job.is_finished(), "the password only opened it");
+    wait_until_answerable(&mut h);
+    h.get_by_label("Allow").click();
+    h.run_steps(3);
+    assert_eq!(job.join().unwrap(), scrpad::instance::Reply::Text("SECRET_NAME_XYZ=sk-live".into()));
+    assert!(h.state().session.state.notes[1].is_locked());
+    // Its names are remembered in the session, never in the file.
+    assert!(h.state_mut().session.save_now());
+    assert!(!std::fs::read_to_string(&path).unwrap().contains("SECRET_NAME_XYZ"));
+    drop(h);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

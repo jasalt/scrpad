@@ -509,9 +509,8 @@ impl Tui {
             }
             KeyCode::Enter if ready && needs => {
                 let typed = std::mem::take(password);
-                if let Err(e) = self.session.allow(Some(&typed), now) {
-                    *error = Some(e);
-                }
+                // Ok for a `--run` can mean only opened: the box then shows the names.
+                *error = self.session.allow(Some(&typed), now).err();
             }
             _ if needs => field_key(password, key),
             _ => {}
@@ -928,10 +927,19 @@ impl Tui {
                             lines.extend(wrap("Git does not ignore this file: it could be committed.", style::ERROR));
                         }
                     }
-                    Ask::Run { title, argv } => {
+                    Ask::Run { title, argv, shown } => {
                         lines.extend(wrap(&format!("Give “{title}” to a command?"), Style::new().add_modifier(Modifier::BOLD)));
                         lines.extend(wrap(&crate::handoff::shown_command(argv), style::MUTED));
                         lines.extend(wrap("Its KEY=VALUE lines become the command's environment.", style::MUTED));
+                        match shown {
+                            Some(Ok(shown)) => {
+                                for (line, warning) in shown.lines(self.session.state.warnings) {
+                                    lines.extend(wrap(&line, if warning { style::ERROR } else { Style::new() }));
+                                }
+                            }
+                            Some(Err(e)) => lines.extend(wrap(e, style::ERROR)),
+                            None => {}
+                        }
                     }
                     Ask::Read { title, text, findings, .. } => {
                         lines.extend(wrap(&format!("Let the agent read “{title}”?"), Style::new().add_modifier(Modifier::BOLD)));

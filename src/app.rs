@@ -1445,6 +1445,7 @@ impl App {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         let needs_password = self.session.approval_needs_password();
+        let warnings = self.session.state.warnings;
         let mut answer = None;
         let frame = egui::Frame::new()
             .fill(t.popup)
@@ -1470,11 +1471,22 @@ impl App {
                         ui.label(note("Git does not ignore this file: it could be committed.", t.error));
                     }
                 }
-                Ask::Run { title, argv } => {
+                Ask::Run { title, argv, shown } => {
                     ui.label(egui::RichText::new(format!("Give “{title}” to a command?")).font(theme::semibold(14.0)).color(t.text));
                     let font = egui::FontId::monospace(12.5);
                     ui.label(egui::RichText::new(crate::handoff::shown_command(argv)).font(font).color(t.text_muted));
                     ui.label(note("Its KEY=VALUE lines become the command's environment.", t.text_muted));
+                    match shown {
+                        Some(Ok(shown)) => {
+                            for (line, warning) in shown.lines(warnings) {
+                                ui.label(note(&line, if warning { t.error } else { t.text }));
+                            }
+                        }
+                        Some(Err(e)) => {
+                            ui.label(note(e, t.error));
+                        }
+                        None => {}
+                    }
                 }
                 Ask::Read { title, text, findings, .. } => {
                     ui.label(egui::RichText::new(format!("Let the agent read “{title}”?")).font(theme::semibold(14.0)).color(t.text));

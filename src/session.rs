@@ -2,7 +2,7 @@
 //! locking and hiding, toasts and the requests of other launches. No UI toolkit in here: a
 //! frontend draws it and calls in.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
@@ -88,12 +88,68 @@ impl ToastAction {
 pub enum Ask {
     /// `--write`: the note titled `title` into the file `target.path`.
     Write { title: String, target: handoff::Target, git_ignored: Option<bool> },
-    /// `--run`: the note's variables to the command `argv`.
-    Run { title: String, argv: Vec<String> },
+    /// `--run`: the note's variables to the command `argv`. `shown` is what the dialog says
+    /// about them, or why the note is no `.env` file; `None` while the note is locked.
+    Run { title: String, argv: Vec<String>, shown: Option<Result<RunShown, String>> },
     /// `--read`: the text of the note titled `title`. The server thread asks with `note` 0 and
     /// the rest empty; the window fills in the note it found, the copy of its text taken now
     /// (which the agent gets, so it is what the user saw) and what the scan found in it.
     Read { title: String, note: u64, text: String, findings: Vec<scan::Finding> },
+}
+
+/// What the `--run` dialog shows about the note's variables: their names, never their values.
+pub struct RunShown {
+    pub names: Vec<String>,
+    /// The names the last allowed `--run` of this note did not have; `None` for its first one.
+    pub new: Option<Vec<String>>,
+    /// Of the parsed pairs, names and values: `allow` hands over only what parses to the same.
+    digest: [u8; 32],
+    /// A locked note: its text, decrypted with the password, and a hash of the cipher it came
+    /// from. Handed over on the next Allow; dropped when notes lock.
+    opened: Option<(Zeroizing<String>, [u8; 32])>,
+}
+
+impl RunShown {
+    /// The dialog's lines about the variables, each with whether it is a warning (the error
+    /// colour). With warnings off there are none: the names and the new names stay, as
+    /// information, and the reasons go.
+    pub fn lines(&self, warnings: bool) -> Vec<(String, bool)> {
+        let n = self.names.len();
+        let mut lines = vec![(format!("Sets {n} variable{}: {}", if n == 1 { "" } else { "s" }, self.names.join(", ")), false)];
+        match &self.new {
+            None => lines.push(("First time for this note".to_owned(), false)),
+            Some(new) if !new.is_empty() => lines.push((format!("New since you last allowed: {}", new.join(", ")), warnings)),
+            Some(_) => {}
+        }
+        if warnings {
+            for name in &self.names {
+                if let Some(reason) = handoff::risky_reason(name) {
+                    lines.push((format!("{name}: {reason}"), true));
+                }
+            }
+        }
+        lines
+    }
+}
+
+/// The refusal when the note's variables differ from what the dialog showed.
+const RUN_CHANGED: &str = "the note changed while you were asked; ask again";
+
+/// The digest of a note's `KEY=VALUE` pairs and their names; the values are wiped.
+fn digest_pairs(mut pairs: Vec<(String, String)>) -> ([u8; 32], Vec<String>) {
+    let mut hasher = Blake2s256::new();
+    for (key, value) in &pairs {
+        for part in [key, value] {
+            hasher.update((part.len() as u64).to_le_bytes());
+            hasher.update(part.as_bytes());
+        }
+    }
+    let names = pairs.iter_mut().map(|(key, value)| {
+        value.zeroize();
+        std::mem::take(key)
+    });
+    let names = names.collect();
+    (hasher.finalize().into(), names)
 }
 
 /// `n` with thousands separators: 9,994.
@@ -137,6 +193,8 @@ pub struct Approval {
     pub ask: Ask,
     /// When it showed (the frontend's clock): for the type-ahead guard and the expiry.
     pub since: f64,
+    /// From when keys and clicks may answer: `since`, or when a locked note's names showed.
+    answerable_from: f64,
     reply: mpsc::Sender<Reply>,
     /// See `ApprovalRequest`.
     settled: Arc<AtomicBool>,
@@ -189,6 +247,9 @@ pub struct Session {
     pub(crate) approval_requests: (mpsc::Sender<ApprovalRequest>, mpsc::Receiver<ApprovalRequest>),
     /// A question is asked or waits to be: the next one is refused, not queued.
     approval_busy: Arc<AtomicBool>,
+    /// Per encrypted note's title: the variable names of its last allowed `--run`, kept here and
+    /// not in `state.run_names` so that they never reach the file.
+    run_names_secret: BTreeMap<String, Vec<String>>,
     /// Per unlocked note: a hash of the text that was scanned, and what the scan found in it.
     scans: HashMap<u64, ([u8; 32], Vec<scan::Finding>)>,
     wake: Wake,
@@ -226,6 +287,7 @@ impl Session {
             approval: None,
             approval_requests: mpsc::channel(),
             approval_busy: Arc::new(AtomicBool::new(false)),
+            run_names_secret: BTreeMap::new(),
             scans: HashMap::new(),
             wake,
         };
@@ -541,7 +603,7 @@ impl Session {
                     Ok(target) => Ask::Write { title: title.clone(), git_ignored: handoff::git_ignored(&target.path), target },
                     Err(e) => return Reply::Error(e),
                 },
-                crate::cli::Command::Run { title, argv } => Ask::Run { title: title.clone(), argv: argv.clone() },
+                crate::cli::Command::Run { title, argv } => Ask::Run { title: title.clone(), argv: argv.clone(), shown: None },
                 crate::cli::Command::Read(title) => Ask::Read { title: title.clone(), note: 0, text: String::new(), findings: Vec::new() },
                 _ => return Reply::Error("not a command that needs your approval".into()),
             };
@@ -602,9 +664,15 @@ impl Session {
                     let _ = reply.send(Reply::Error("no note has that title".into()));
                     continue;
                 }
+                Ask::Run { title, argv, .. } => {
+                    // The note `allow` hands over; a locked one shows its names after the password.
+                    let note = self.state.notes.iter().find(|n| n.title == title).filter(|n| !n.is_locked());
+                    let shown = note.map(|n| self.run_shown(n, &n.text));
+                    Ask::Run { title, argv, shown }
+                }
                 ask => ask,
             };
-            self.approval = Some(Approval { ask, since: now, reply, settled });
+            self.approval = Some(Approval { ask, since: now, answerable_from: now, reply, settled });
             self.repaint();
         }
     }
@@ -627,14 +695,32 @@ impl Session {
         }
     }
 
-    /// Past the type-ahead guard: keys and clicks may answer now.
-    pub fn approval_ready(&self, now: f64) -> bool {
-        self.approval.as_ref().is_some_and(|a| now >= a.since + APPROVAL_GRACE)
+    /// What the `--run` dialog shows about `text`, the text of `note`, against the names the
+    /// last allowed `--run` of a note with its title had.
+    fn run_shown(&self, note: &Note, text: &str) -> Result<RunShown, String> {
+        let (digest, names) = digest_pairs(handoff::parse_env(text)?);
+        let remembered = if note.is_encrypted() { &self.run_names_secret } else { &self.state.run_names };
+        let new = remembered
+            .get(&note.title)
+            .map(|old| names.iter().filter(|name| !old.iter().any(|o| o.eq_ignore_ascii_case(name))).cloned().collect());
+        Ok(RunShown { names, new, digest, opened: None })
     }
 
+    /// Past the type-ahead guard: keys and clicks may answer now.
+    pub fn approval_ready(&self, now: f64) -> bool {
+        self.approval.as_ref().is_some_and(|a| now >= a.answerable_from + APPROVAL_GRACE)
+    }
+
+    /// The dialog asks for the note's password: the note is locked and, for a `--run`, not yet
+    /// opened with it for this question.
     pub fn approval_needs_password(&self) -> bool {
         let Some(a) = &self.approval else { return false };
-        !matches!(a.ask, Ask::Read { .. }) && self.asked_note(a).is_some_and(Note::is_locked)
+        let locked = self.asked_note(a).is_some_and(Note::is_locked);
+        match &a.ask {
+            Ask::Read { .. } => false,
+            Ask::Run { shown: Some(Ok(RunShown { opened: Some(_), .. })), .. } => false,
+            _ => locked,
+        }
     }
 
     fn asked_note(&self, a: &Approval) -> Option<&Note> {
@@ -679,6 +765,9 @@ impl Session {
             let _ = a.reply.send(Reply::Error(format!("“{}” was closed", a.ask.title())));
             return Ok(());
         };
+        if matches!(a.ask, Ask::Run { .. }) {
+            return self.allow_run(password, now);
+        }
         let text: Zeroizing<String> = if note.is_locked() {
             let cipher = note.cipher.as_deref().unwrap_or_default();
             Zeroizing::new(crypto::decrypt(password.unwrap_or_default(), cipher).map_err(|_| "Wrong password".to_owned())?)
@@ -696,10 +785,7 @@ impl Session {
                 Ok(()) => Reply::Text(format!("wrote {}", target.path.display())),
                 Err(e) => Reply::Error(e),
             },
-            Ask::Run { title, .. } => match handoff::parse_env(&text) {
-                Ok(_) => Reply::Text(text.to_string()),
-                Err(e) => Reply::Error(format!("“{title}”: {e}")),
-            },
+            Ask::Run { .. } => unreachable!("answered by allow_run"),
             Ask::Read { .. } => unreachable!("answered by allow_read"),
         };
         let toast = match &reply {
@@ -709,6 +795,88 @@ impl Session {
         let _ = a.reply.send(reply);
         self.toast(now, toast, None);
         Ok(())
+    }
+
+    /// The user allowed a `--run`. A locked note takes two Allows: the first opens it with
+    /// `password` and shows its names, handing nothing over; the second hands over the text
+    /// opened then. Either way the note is handed over only if its variables, names and values,
+    /// are still the ones the dialog showed; then their names are remembered for the next time.
+    fn allow_run(&mut self, password: Option<&str>, now: f64) -> Result<(), String> {
+        let a = self.approval.as_ref().expect("checked");
+        let note = self.asked_note(a).expect("checked");
+        let Ask::Run { shown, .. } = &a.ask else { unreachable!("checked") };
+        let encrypted = note.is_encrypted();
+        let cipher = note.cipher.as_deref().unwrap_or_default();
+        let opened = match shown {
+            Some(Ok(RunShown { opened: Some(opened), .. })) => Some(opened),
+            _ => None,
+        };
+        // The note's text now, or why it is refused.
+        let text: Result<Zeroizing<String>, String> = if !note.is_locked() {
+            Ok(Zeroizing::new(note.text.clone()))
+        } else if let Some((text, from)) = opened {
+            if *from == text_hash(cipher) { Ok(text.clone()) } else { Err(RUN_CHANGED.to_owned()) }
+        } else {
+            let text = Zeroizing::new(crypto::decrypt(password.unwrap_or_default(), cipher).map_err(|_| "Wrong password".to_owned())?);
+            let from = text_hash(cipher);
+            match self.run_shown(note, &text) {
+                Ok(mut opened) => {
+                    opened.opened = Some((text, from));
+                    let a = self.approval.as_mut().expect("checked");
+                    if let Ask::Run { shown, .. } = &mut a.ask {
+                        *shown = Some(Ok(opened));
+                    }
+                    // A second Allow, not the key that sent the password, hands it over.
+                    a.answerable_from = now;
+                    self.repaint();
+                    return Ok(());
+                }
+                Err(e) => Err(format!("“{}”: {e}", note.title)),
+            }
+        };
+        let a = self.approval.take().expect("checked");
+        if a.settled.swap(true, Ordering::SeqCst) {
+            self.toast(now, format!("Not answered in time: “{}”", a.ask.title()), None);
+            return Ok(());
+        }
+        let Ask::Run { title, shown, .. } = &a.ask else { unreachable!("checked") };
+        let shown_digest = match shown {
+            Some(Ok(shown)) => Some(shown.digest),
+            _ => None,
+        };
+        let parsed = text.and_then(|text| {
+            let pairs = handoff::parse_env(&text).map_err(|e| format!("“{title}”: {e}"))?;
+            Ok((digest_pairs(pairs), text))
+        });
+        let reply = match parsed {
+            Ok(((digest, names), text)) if Some(digest) == shown_digest => {
+                self.remember_run_names(title, encrypted, names, now);
+                Reply::Text(text.to_string())
+            }
+            Ok(_) => Reply::Error(RUN_CHANGED.into()),
+            Err(e) => Reply::Error(e),
+        };
+        let toast = match &reply {
+            Reply::Error(e) => e.clone(),
+            _ => format!("Handed over “{title}”"),
+        };
+        let _ = a.reply.send(reply);
+        self.toast(now, toast, None);
+        Ok(())
+    }
+
+    /// The names of an allowed `--run`, for the next one to compare with: in the file for a
+    /// plain or hidden note, in this session only for an encrypted one.
+    fn remember_run_names(&mut self, title: &str, encrypted: bool, names: Vec<String>, now: f64) {
+        if encrypted {
+            self.run_names_secret.insert(title.to_owned(), names);
+            if self.state.run_names.remove(title).is_some() {
+                self.mark_dirty(now);
+            }
+        } else if self.state.run_names.get(title) != Some(&names) {
+            self.state.run_names.insert(title.to_owned(), names);
+            self.mark_dirty(now);
+        }
     }
 
     /// The user said no: the launch gets an error.
@@ -859,6 +1027,10 @@ impl Session {
             return Err(crypto::Error::InvalidFormat);
         }
         note.encrypt(password)?;
+        // Its `--run` names leave the file with its plaintext; see `remember_run_names`.
+        let title = note.title.clone();
+        self.state.run_names.remove(&title);
+        let note = self.state.current_mut();
         self.epoch += 1;
         let (id, hash) = (note.id, text_hash(&note.text));
         self.sealed.insert(id, hash);
@@ -938,6 +1110,10 @@ impl Session {
         }
         window.track(&self.state);
         self.drop_unreadable_read(None);
+        // A locked note opened for a `--run` question: it asks for the password again.
+        if let Some(Approval { ask: Ask::Run { shown: shown @ Some(Ok(RunShown { opened: Some(_), .. })), .. }, .. }) = &mut self.approval {
+            *shown = None;
+        }
         locked
     }
 
@@ -1111,7 +1287,7 @@ pub(crate) fn lock(window: &Mutex<scripts::Window>) -> MutexGuard<'_, scripts::W
 
 #[cfg(test)]
 mod tests {
-    use super::{APPROVAL_GRACE, APPROVAL_WAIT, SealJob, Session, spawn_sealer};
+    use super::{APPROVAL_GRACE, APPROVAL_WAIT, Ask, RUN_CHANGED, RunShown, SealJob, Session, spawn_sealer};
     use crate::cli::Command;
     use crate::instance::Reply;
     use crate::store::{Note, ReadMode, State};
@@ -1185,18 +1361,154 @@ mod tests {
     }
 
     #[test]
-    fn a_locked_note_needs_its_password_in_the_dialog_and_stays_locked() {
+    fn a_locked_note_shows_its_names_after_the_password_and_hands_over_on_a_second_allow() {
         let mut s = session_with(vec![note("prod.env", "KEY=v")]);
         s.state.notes[0].encrypt("pw").unwrap();
         s.state.notes[0].lock();
         let job = ask_and_wait(&s, Command::Run { title: "prod.env".into(), argv: vec!["env".into()] });
         wait_for_approval(&mut s, 1.0);
         assert!(s.approval_needs_password());
+        assert!(run_shown(&s).is_none(), "nothing to show before the password");
         assert!(s.allow(Some("wrong"), 2.0).is_err());
         assert!(s.approval.is_some(), "a wrong password keeps the dialog");
         s.allow(Some("pw"), 2.0).unwrap();
+        assert!(!s.approval_needs_password() && !job.is_finished(), "the password only opens it");
+        assert_eq!(run_shown(&s).unwrap().names, ["KEY"]);
+        assert!(!s.approval_ready(2.0 + APPROVAL_GRACE / 2.0), "the key that sent the password can't allow it too");
+        // Locking drops what was opened: the password is asked again.
+        s.lock_all();
+        assert!(s.approval_needs_password() && run_shown(&s).is_none());
+        s.allow(Some("pw"), 3.0).unwrap();
+        s.allow(None, 4.0).unwrap();
         assert_eq!(job.join().unwrap(), Reply::Text("KEY=v".into()));
         assert!(s.state.notes[0].is_locked(), "allowing does not unlock the note");
+    }
+
+    /// What the open `--run` question shows about the variables.
+    fn run_shown(s: &Session) -> Option<&RunShown> {
+        match &s.approval.as_ref()?.ask {
+            Ask::Run { shown: Some(Ok(shown)), .. } => Some(shown),
+            _ => None,
+        }
+    }
+
+    /// Asks `--run` of the note titled `.env` and waits for the question.
+    fn ask_run(s: &mut Session) -> std::thread::JoinHandle<Reply> {
+        let job = ask_and_wait(s, Command::Run { title: ".env".into(), argv: vec!["env".into()] });
+        wait_for_approval(s, 1.0);
+        job
+    }
+
+    /// A session saving to a fresh folder named after `name`, for scripts to append to.
+    fn session_saving(name: &str, notes: Vec<Note>) -> (Session, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("scrpad-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut s = Session::new(State { notes, ..State::default() }, Some(dir.join("notes.json")), None, Arc::new(|_| {}));
+        assert!(s.save_now());
+        (s, dir)
+    }
+
+    /// Appends `text` to the note titled `.env` as a script would, and takes it in.
+    fn append_env(s: &mut Session, text: &str) {
+        let server = s.script_server();
+        assert_eq!(server(&Command::Append { title: ".env".into(), text: text.into() }), Reply::Ok);
+        let shared = s.scripts.clone();
+        s.take_appends(&mut super::lock(&shared), Some(1.0));
+    }
+
+    #[test]
+    fn a_run_shows_the_names_a_first_time_and_then_the_new_names() {
+        let (mut s, dir) = session_saving("run-names", vec![note(".env", "API_KEY=sk-1\nPATH=/x")]);
+        let job = ask_run(&mut s);
+        let shown = run_shown(&s).unwrap();
+        assert_eq!(shown.names, ["API_KEY", "PATH"]);
+        assert_eq!(
+            shown.lines(true),
+            [
+                ("Sets 2 variables: API_KEY, PATH".to_owned(), false),
+                ("First time for this note".to_owned(), false),
+                ("PATH: changes which programs start".to_owned(), true),
+            ]
+        );
+        s.allow(None, 2.0).unwrap();
+        assert!(matches!(job.join().unwrap(), Reply::Text(_)));
+        assert_eq!(s.state.run_names[".env"], ["API_KEY", "PATH"]);
+
+        // The same names again: routine, nothing new to say.
+        let job = ask_run(&mut s);
+        assert_eq!(run_shown(&s).unwrap().lines(false), [("Sets 2 variables: API_KEY, PATH".to_owned(), false)]);
+        s.allow(None, 2.0).unwrap();
+        job.join().unwrap();
+
+        append_env(&mut s, "https_proxy=http://evil");
+        let job = ask_run(&mut s);
+        let lines = run_shown(&s).unwrap().lines(true);
+        assert!(lines.contains(&("New since you last allowed: https_proxy".to_owned(), true)), "{lines:?}");
+        assert!(lines.contains(&("https_proxy: sends traffic through another server".to_owned(), true)), "{lines:?}");
+        // Warnings off: the names and the new name stay, as information; no reasons, no highlight.
+        let lines = run_shown(&s).unwrap().lines(false);
+        assert_eq!(
+            lines,
+            [
+                ("Sets 3 variables: API_KEY, PATH, https_proxy".to_owned(), false),
+                ("New since you last allowed: https_proxy".to_owned(), false),
+            ]
+        );
+        assert!(lines.iter().all(|(line, _)| !line.contains("sk-1") && !line.contains("evil")), "never a value");
+        s.deny(2.0);
+        job.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_note_that_changed_while_asked_is_refused() {
+        // An appended variable.
+        let (mut s, dir) = session_saving("run-changed", vec![note(".env", "A=1")]);
+        let job = ask_run(&mut s);
+        append_env(&mut s, "B=2");
+        s.allow(None, 2.0).unwrap();
+        assert_eq!(job.join().unwrap(), Reply::Error(RUN_CHANGED.into()));
+        assert!(s.state.run_names.is_empty(), "nothing handed over, nothing remembered");
+        // An appended duplicate: the same names, and refused for repeating a key.
+        let job = ask_run(&mut s);
+        append_env(&mut s, "A=evil");
+        s.allow(None, 2.0).unwrap();
+        let Reply::Error(e) = job.join().unwrap() else { panic!() };
+        assert!(e.contains("repeats a key") && !e.contains("evil"), "{e}");
+        // A changed value with the same names: what was shown is not what would go.
+        s.state.notes[0].text = "A=1".into();
+        let job = ask_run(&mut s);
+        s.state.notes[0].text = "A=2".into();
+        s.allow(None, 2.0).unwrap();
+        assert_eq!(job.join().unwrap(), Reply::Error(RUN_CHANGED.into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_encrypted_notes_names_stay_out_of_the_file() {
+        let dir = std::env::temp_dir().join(format!("scrpad-run-names-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut env = note(".env", "SECRET_NAME_XYZ=1");
+        env.encrypt("pw").unwrap();
+        let plain = note("dev.env", "PLAIN_NAME_ABC=1");
+        let mut s =
+            Session::new(State { notes: vec![env, plain], ..State::default() }, Some(dir.join("notes.json")), None, Arc::new(|_| {}));
+        let job = ask_run(&mut s);
+        s.allow(None, 2.0).unwrap();
+        job.join().unwrap();
+        let job = ask_and_wait(&s, Command::Run { title: "dev.env".into(), argv: vec!["env".into()] });
+        wait_for_approval(&mut s, 1.0);
+        s.allow(None, 2.0).unwrap();
+        job.join().unwrap();
+        assert!(s.save_now());
+        let json = std::fs::read_to_string(dir.join("notes.json")).unwrap();
+        assert!(!json.contains("SECRET_NAME_XYZ") && json.contains("PLAIN_NAME_ABC"), "{json}");
+        // Remembered in the session: the second time is not a first time.
+        let job = ask_run(&mut s);
+        assert_eq!(run_shown(&s).unwrap().new.as_deref(), Some(&[][..]));
+        s.deny(2.0);
+        job.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

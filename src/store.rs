@@ -1,5 +1,6 @@
 //! The notes and window preferences, saved as JSON in the user's config directory.
 
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -200,6 +201,11 @@ pub struct State {
     /// Keep the whole window out of screenshots, recordings and screen sharing, not only
     /// while a hidden or encrypted note is open (the GUI does that regardless).
     pub hide_from_capture: bool,
+    /// Per note title: the variable names (never values) of the last `--run` the user allowed,
+    /// for the dialog to point out new ones. Plain and hidden notes only: an encrypted note's
+    /// names stay in the session, out of the file.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub run_names: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for State {
@@ -219,6 +225,7 @@ impl Default for State {
             warnings: true,
             script_reading: ReadMode::Off,
             hide_from_capture: false,
+            run_names: BTreeMap::new(),
         };
         state.fix_up();
         state
@@ -550,6 +557,7 @@ mod tests {
         assert!(s.notes[1].is_locked() && s.notes[1].text.is_empty());
         // Options added later default to on, except reading by scripts.
         assert!(s.auto_lock && s.auto_rehide && s.warnings && s.script_reading == ReadMode::Off);
+        assert!(s.run_names.is_empty(), "a file from before remembers no --run names");
         let s: State = serde_json::from_str(r#"{"auto_lock":false}"#).unwrap();
         assert!(!s.auto_lock && s.auto_rehide);
         let s: State = serde_json::from_str(r#"{"auto_lock":false,"auto_rehide":false}"#).unwrap();
