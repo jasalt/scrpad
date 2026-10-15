@@ -71,12 +71,21 @@ signal-hook = "0.3"
 rustix = { version = "1", features = ["fs"] }
 
 # The named pipe on Windows: a security descriptor that lets in only the current user
-# (widestring for its SDDL string), and CancelIoEx to give its reads and writes a deadline,
-# which named pipes lack. Both crates are already in the tree through interprocess. The console
-# control handler lets the terminal UI save when its console window is closed.
+# (widestring for its SDDL string), CancelIoEx to give its reads and writes a deadline, which
+# named pipes lack, and the user's SID and the pipe owner's for the client's check. Both crates
+# are already in the tree through interprocess, with these features. The console control
+# handler lets the terminal UI save when its console window is closed.
 [target.'cfg(windows)'.dependencies]
 widestring = "1"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_IO", "Win32_System_Console"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+] }
 
 # `--features console` also builds scrpad-console, which Windows releases ship as scrpad.com
 # (src/bin/scrpad-console.rs); elsewhere the one `scrpad` binary does both.

@@ -1,9 +1,9 @@
 //! One scrpad per user: a second launch hands its command to the running one and exits. They
 //! meet at a Unix domain socket in a directory only the user can enter (`$XDG_RUNTIME_DIR` on
-//! Linux, the per-user `$TMPDIR` on macOS) or at a named pipe that only the user can open and
-//! that refuses remote clients (Windows). Nothing here ever touches the network. `scrpad
-//! --toggle` bound to a key in the compositor is how a hidden window comes back on Wayland,
-//! where apps get no global keys.
+//! Linux, the per-user `$TMPDIR` on macOS) or at a named pipe that only the user can open, that
+//! refuses remote clients, and that a launch talks to only once it has seen the user owns it
+//! (Windows). Nothing here ever touches the network. `scrpad --toggle` bound to a key in the
+//! compositor is how a hidden window comes back on Wayland, where apps get no global keys.
 //!
 //! The protocol is one request and one reply per connection. A request is one line, `show`,
 //! `toggle` or `list`, or a line of lengths followed by that many bytes of UTF-8:
@@ -198,12 +198,42 @@ pub fn address() -> Option<PathBuf> {
 }
 
 /// Where the running instance listens: a named pipe, one per user (pipe names are global to the
-/// machine). The pipe itself lets in only its owner; see `listen`.
+/// machine), named after the user's SID: two accounts of the same name, one local and one on a
+/// domain, get two pipes. The pipe itself lets in only its owner (see `listen`), and a launch
+/// checks the owner before it talks (see `connect`); the name is no secret.
 #[cfg(windows)]
 pub fn address() -> Option<PathBuf> {
-    let user: String =
-        std::env::var("USERNAME").unwrap_or_default().chars().filter(|c| c.is_alphanumeric() || "-_.".contains(*c)).collect();
+    let user = sid_string(&pipe::user().ok()?)?;
     Some(PathBuf::from(format!(r"\\.\pipe\scrpad-{user}")))
+}
+
+/// What a launch says of a pipe it did not create: someone took the name first.
+#[cfg(any(windows, test))]
+const NOT_OURS: &str = "the scrpad pipe belongs to another user";
+
+/// Talks only to a pipe owned by this user: another user who creates the pipe before this
+/// user's first launch would otherwise get every request, and answer `--run` as they like.
+#[cfg(any(windows, test))]
+fn check_owner(owner: &[u8], user: &[u8]) -> io::Result<()> {
+    if owner == user { Ok(()) } else { Err(io::Error::new(io::ErrorKind::PermissionDenied, NOT_OURS)) }
+}
+
+/// A SID in its string form (`S-1-5-21-…`), from its bytes: revision, count of sub-authorities,
+/// a 48-bit big-endian authority, then each sub-authority as 32 bits little-endian.
+#[cfg(any(windows, test))]
+fn sid_string(sid: &[u8]) -> Option<String> {
+    use std::fmt::Write as _;
+    let [revision, count, rest @ ..] = sid else { return None };
+    let (authority, subs) = rest.split_first_chunk::<6>()?;
+    if subs.len() != usize::from(*count) * 4 {
+        return None;
+    }
+    let authority = authority.iter().fold(0u64, |sum, &byte| sum << 8 | u64::from(byte));
+    let mut string = if authority >> 32 == 0 { format!("S-{revision}-{authority}") } else { format!("S-{revision}-0x{authority:012X}") };
+    for sub in subs.chunks_exact(4) {
+        let _ = write!(string, "-{}", u32::from_le_bytes([sub[0], sub[1], sub[2], sub[3]]));
+    }
+    Some(string)
 }
 
 pub enum Claim {
@@ -220,7 +250,7 @@ pub fn claim(address: &Path, command: &Command) -> io::Result<Claim> {
     let name = address.to_fs_name::<GenericFilePath>()?;
     let give_up = Instant::now() + ANSWER_TIMEOUT;
     loop {
-        match Stream::connect(name.borrow()) {
+        match connect(address, name.borrow()) {
             Ok(stream) => match send(&stream, command) {
                 Ok(Reply::Busy) if Instant::now() < give_up => {
                     std::thread::sleep(Duration::from_millis(50));
@@ -242,6 +272,8 @@ pub fn claim(address: &Path, command: &Command) -> io::Result<Claim> {
                     None => return Err(io::Error::new(io::ErrorKind::AddrInUse, "another scrpad is starting")),
                 }
             }
+            // Another user's pipe (see `connect`): nothing was sent, and no second window may start.
+            Err(e) if cfg!(windows) && e.kind() == io::ErrorKind::PermissionDenied => return Ok(Claim::Refused(e)),
             Err(e) => return Err(e),
         }
     }
@@ -256,9 +288,7 @@ pub fn claim(address: &Path, command: &Command) -> io::Result<Claim> {
 fn replace_stale(address: &Path, name: interprocess::local_socket::Name<'_>) -> io::Result<Option<Listener>> {
     #[cfg(unix)]
     let _lock = lock(address)?;
-    #[cfg(windows)]
-    let _ = address;
-    if Stream::connect(name.borrow()).is_ok() {
+    if connect(address, name.borrow()).is_ok() {
         return Ok(None);
     }
     #[cfg(unix)]
@@ -268,9 +298,53 @@ fn replace_stale(address: &Path, name: interprocess::local_socket::Name<'_>) -> 
     }
     match listen(name) {
         Ok(listener) => Ok(Some(listener)),
-        Err(e) if e.kind() == io::ErrorKind::AddrInUse || cfg!(windows) && e.kind() == io::ErrorKind::PermissionDenied => Ok(None),
+        Err(e) if e.kind() == io::ErrorKind::AddrInUse => Ok(None),
+        // Someone created the pipe since the look above: another launch, or another user who
+        // took the name. The next `connect` in `claim` tells them apart by the pipe's owner.
+        Err(e) if cfg!(windows) && e.kind() == io::ErrorKind::PermissionDenied => Ok(None),
         Err(e) => Err(e),
     }
+}
+
+/// The other end of the conversation with a running instance, as `claim` sees it.
+#[cfg(unix)]
+type Client = Stream;
+/// The pipe is opened by hand (see `connect`); a synchronous handle reads and writes as a file.
+#[cfg(windows)]
+type Client = std::fs::File;
+
+/// Connects to the running instance. The socket's directory lets in only this user (`address`).
+#[cfg(unix)]
+fn connect(_: &Path, name: interprocess::local_socket::Name<'_>) -> io::Result<Client> {
+    Stream::connect(name)
+}
+
+/// Connects to the running instance's pipe, whose name anyone can take, so only once it has seen
+/// that the pipe's owner is this user (`check_owner`), and never letting the other end act as
+/// this user: interprocess opens the client end with the default, impersonation, and reopens any
+/// handle it is given the same way. Access denied comes from a pipe that lets in someone else.
+#[cfg(windows)]
+fn connect(address: &Path, _: interprocess::local_socket::Name<'_>) -> io::Result<Client> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsHandle;
+    use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
+    use windows_sys::Win32::Storage::FileSystem::{SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT};
+    let give_up = Instant::now() + ANSWER_TIMEOUT;
+    let pipe = loop {
+        let mut options = std::fs::OpenOptions::new();
+        // Identification: the server may ask who connects, but never act as them.
+        options.read(true).write(true).security_qos_flags(SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION);
+        match options.open(address) {
+            // Every instance of the pipe has a client: the server makes another one as it accepts.
+            Err(e) if e.raw_os_error().and_then(|code| u32::try_from(code).ok()) == Some(ERROR_PIPE_BUSY) && Instant::now() < give_up => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Err(io::Error::new(e.kind(), NOT_OURS)),
+            result => break result?,
+        }
+    };
+    check_owner(&pipe::owner(pipe.as_handle())?, &pipe::user()?)?;
+    Ok(pipe)
 }
 
 /// An exclusive lock on `scrpad.lock` next to the socket, held until the returned file is dropped.
@@ -297,9 +371,91 @@ fn listen(name: interprocess::local_socket::Name<'_>) -> io::Result<Listener> {
 fn listen(name: interprocess::local_socket::Name<'_>) -> io::Result<Listener> {
     use interprocess::os::windows::local_socket::ListenerOptionsExt;
     use interprocess::os::windows::security_descriptor::SecurityDescriptor;
-    // Protected DACL with one entry: generic all for OWNER RIGHTS.
-    let owner_only = SecurityDescriptor::deserialize(widestring::u16cstr!("D:P(A;;GA;;;OW)"))?;
+    // The owner is the user, which a launch checks (`connect`): left out, an elevated scrpad
+    // would make it the Administrators group. Then a protected DACL with one entry: generic all
+    // for OWNER RIGHTS.
+    let user = sid_string(&pipe::user()?).ok_or_else(|| io::Error::other("the user's SID is malformed"))?;
+    let sddl = widestring::U16CString::from_str(format!("O:{user}D:P(A;;GA;;;OW)")).map_err(io::Error::other)?;
+    let owner_only = SecurityDescriptor::deserialize(&sddl)?;
     ListenerOptions::new().name(name).security_descriptor(owner_only).create_sync()
+}
+
+/// The Windows calls behind the pipe's owner check: who owns a pipe, and who this process runs as.
+/// Both give a SID as its bytes, which `check_owner` compares (as EqualSid does).
+#[cfg(windows)]
+mod pipe {
+    use std::io;
+    use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
+    use std::ptr::null_mut;
+
+    use windows_sys::Win32::Foundation::{ERROR_SUCCESS, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
+    use windows_sys::Win32::Security::{
+        GetLengthSid, GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    /// The SID that owns the pipe; empty if it has no owner.
+    pub fn owner(pipe: BorrowedHandle<'_>) -> io::Result<Vec<u8>> {
+        let (mut owner, mut descriptor): (PSID, PSECURITY_DESCRIPTOR) = (null_mut(), null_mut());
+        // SAFETY: `pipe` is open for the call (opened with read access, which includes reading its
+        // owner), and every out pointer is either valid for a write or null where it may be.
+        let status = unsafe {
+            GetSecurityInfo(
+                pipe.as_raw_handle(),
+                SE_KERNEL_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                &mut owner,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                &mut descriptor,
+            )
+        };
+        if status != ERROR_SUCCESS {
+            // Win32 error codes are far below i32::MAX.
+            return Err(io::Error::from_raw_os_error(i32::try_from(status).unwrap_or(i32::MAX)));
+        }
+        // SAFETY: on success `owner` is null or a valid SID inside `descriptor`, not yet freed.
+        let owner = if owner.is_null() { Vec::new() } else { unsafe { sid_bytes(owner) } };
+        // SAFETY: GetSecurityInfo allocated `descriptor` for us to free with LocalFree, and
+        // nothing points into it any more: `owner` was copied out.
+        unsafe { LocalFree(descriptor) };
+        Ok(owner)
+    }
+
+    /// The SID of the user this process runs as.
+    pub fn user() -> io::Result<Vec<u8>> {
+        // A TOKEN_USER and the SID it points to, at most 68 bytes; u64s align the pointer in it.
+        const LEN: u32 = 128;
+        let mut token = null_mut();
+        // SAFETY: GetCurrentProcess gives a pseudo handle, valid always and never closed;
+        // `token` is valid for a write.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: OpenProcessToken succeeded, so `token` is an open handle that only we own.
+        let token = unsafe { OwnedHandle::from_raw_handle(token) };
+        let mut buffer = [0u64; LEN as usize / 8];
+        let mut len = 0;
+        // SAFETY: `token` is open with TOKEN_QUERY, `buffer` is valid for writes of LEN bytes and
+        // aligned for TOKEN_USER, and `len` is valid for a write.
+        if unsafe { GetTokenInformation(token.as_raw_handle(), TokenUser, buffer.as_mut_ptr().cast(), LEN, &mut len) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: on success `buffer` starts with a TOKEN_USER whose SID is valid and lies in
+        // `buffer`, which lives until the bytes are copied out.
+        Ok(unsafe { sid_bytes(buffer.as_ptr().cast::<TOKEN_USER>().read().User.Sid) })
+    }
+
+    /// Copies out the bytes of the SID at `sid`.
+    ///
+    /// # Safety
+    /// `sid` points to a valid SID that stays allocated during the call.
+    unsafe fn sid_bytes(sid: PSID) -> Vec<u8> {
+        // SAFETY: the caller promises a valid SID; GetLengthSid gives its length in bytes.
+        unsafe { std::slice::from_raw_parts(sid.cast::<u8>(), GetLengthSid(sid) as usize).to_vec() }
+    }
 }
 
 /// Keeps the claim while `work` runs (a script command with no window running), then gives it
@@ -323,7 +479,7 @@ pub fn hold<T>(listener: Listener, address: &Path, work: impl FnOnce() -> T) -> 
 }
 
 /// Sends `command` and waits for the answer.
-fn send(stream: &Stream, command: &Command) -> io::Result<Reply> {
+fn send(stream: &Client, command: &Command) -> io::Result<Reply> {
     let limit = if command.may_wait() { APPROVAL_TIMEOUT } else { ANSWER_TIMEOUT };
     within(stream, limit, || {
         let mut writer = stream;
@@ -382,11 +538,10 @@ fn within<T>(stream: &Stream, limit: Duration, exchange: impl FnOnce() -> T) -> 
 /// Runs `exchange` on `stream` and, once `limit` has passed, cancels its pending read or write
 /// (and any it starts after that) until it returns. Named pipes have no timeouts of their own.
 #[cfg(windows)]
-fn within<T>(stream: &Stream, limit: Duration, exchange: impl FnOnce() -> T) -> T {
-    use std::os::windows::io::{AsHandle, AsRawHandle};
+fn within<T>(stream: &impl AsPipe, limit: Duration, exchange: impl FnOnce() -> T) -> T {
+    use std::os::windows::io::AsRawHandle;
     use std::sync::mpsc;
-    let Stream::NamedPipe(pipe) = stream;
-    let handle = pipe.as_handle().as_raw_handle() as usize;
+    let handle = stream.pipe().as_raw_handle() as usize;
     let (done, finished) = mpsc::channel::<()>();
     std::thread::scope(|scope| {
         scope.spawn(move || {
@@ -403,17 +558,46 @@ fn within<T>(stream: &Stream, limit: Duration, exchange: impl FnOnce() -> T) -> 
     })
 }
 
+/// The pipe handle under either end: the server's `Stream`, the client's `File`.
+#[cfg(windows)]
+trait AsPipe {
+    fn pipe(&self) -> std::os::windows::io::BorrowedHandle<'_>;
+}
+
+#[cfg(windows)]
+impl AsPipe for Stream {
+    fn pipe(&self) -> std::os::windows::io::BorrowedHandle<'_> {
+        use std::os::windows::io::AsHandle;
+        let Stream::NamedPipe(pipe) = self;
+        pipe.as_handle()
+    }
+}
+
+#[cfg(windows)]
+impl AsPipe for std::fs::File {
+    fn pipe(&self) -> std::os::windows::io::BorrowedHandle<'_> {
+        std::os::windows::io::AsHandle::as_handle(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::mpsc;
 
+    #[cfg(unix)]
     fn temp_socket(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("scrpad-test-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("scrpad.sock");
         let _ = std::fs::remove_file(&path);
         path
+    }
+
+    /// A pipe of this user's: the tests that claim one pass its owner check (`connect`).
+    #[cfg(windows)]
+    fn temp_socket(name: &str) -> PathBuf {
+        PathBuf::from(format!(r"\\.\pipe\scrpad-test-{}-{name}", std::process::id()))
     }
 
     fn append(title: &str, text: &str) -> Command {
@@ -505,6 +689,40 @@ mod tests {
             &[b'x'; 2000],
         ] {
             assert!(decode_reply(&mut &garbage[..]).is_err(), "{:?}", String::from_utf8_lossy(garbage));
+        }
+    }
+
+    #[test]
+    fn only_a_pipe_of_this_user_is_talked_to() {
+        let user = [1, 2, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 0xe9, 3, 0, 0];
+        assert!(check_owner(&user, &user).is_ok());
+        let mut other = user;
+        other[12] = 0xea;
+        for owner in [&other[..], &user[..15], &[]] {
+            let e = check_owner(owner, &user).unwrap_err();
+            assert_eq!((e.kind(), e.to_string()), (io::ErrorKind::PermissionDenied, NOT_OURS.to_owned()));
+        }
+    }
+
+    #[test]
+    fn sids_read_as_windows_writes_them() {
+        // A domain user, BUILTIN\Administrators, Everyone, and a 48-bit authority.
+        let user = [
+            &[1, 5, 0, 0, 0, 0, 0, 5][..],
+            &21u32.to_le_bytes(),
+            &1_004_336_348u32.to_le_bytes(),
+            &1_177_238_915u32.to_le_bytes(),
+            &682_003_330u32.to_le_bytes(),
+            &1001u32.to_le_bytes(),
+        ]
+        .concat();
+        assert_eq!(sid_string(&user).as_deref(), Some("S-1-5-21-1004336348-1177238915-682003330-1001"));
+        assert_eq!(sid_string(&[1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 2, 0, 0]).as_deref(), Some("S-1-5-32-544"));
+        assert_eq!(sid_string(&[1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]).as_deref(), Some("S-1-1-0"));
+        assert_eq!(sid_string(&[1, 0, 0, 1, 0, 0, 0, 0]).as_deref(), Some("S-1-0x000100000000"));
+        // Cut short, or longer than its count says.
+        for bad in [&[][..], &[1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0], &[1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0], &[1, 1, 0, 0]] {
+            assert_eq!(sid_string(bad), None, "{bad:?}");
         }
     }
 
