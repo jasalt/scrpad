@@ -153,7 +153,7 @@ $ scrpad --write .env .                 (scrpad asks you: Allow)
 wrote /home/you/my-app/.env
 ```
 
-The note's text never comes back to the agent: `--append` answers *ok*, `--write` the path it wrote, and `--run` passes on only what the command itself prints. The `.env` note follows `.env` conventions: blank lines and `#` comments are skipped, an `export ` in front is allowed, one pair of quotes is taken off a value, and nothing is expanded. A note that has another kind of line is refused by `--run`, with the line's number but not its text.
+The note's text never comes back to the agent: `--append` answers *ok*, `--write` the path it wrote, and `--run` passes on only what the command itself prints. The `.env` note follows `.env` conventions: blank lines and `#` comments are skipped, an `export ` in front is allowed, one pair of quotes is taken off a value, and nothing is expanded. A note that has another kind of line, or the same name twice (`PATH` and `Path` count as one), is refused by `--run`, with the line's number but not its text. The program is looked up in the `PATH` of the shell that ran `--run`, before the note's variables are added.
 
 | `--write` | `--run` |
 |---|---|

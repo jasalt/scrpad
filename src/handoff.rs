@@ -283,6 +283,9 @@ pub fn parse_env(text: &str) -> Result<Vec<(String, String)>, String> {
             .find_map(|&(open, close)| value.strip_prefix(open)?.strip_suffix(close))
             .filter(|_| value.len() >= 2)
             .unwrap_or(value);
+        if vars.iter().any(|(seen, _): &(String, String)| seen.eq_ignore_ascii_case(key)) {
+            return Err(format!("line {} repeats a key", i + 1));
+        }
         vars.push((key.to_owned(), value.to_owned()));
     }
     if vars.is_empty() {
@@ -291,11 +294,100 @@ pub fn parse_env(text: &str) -> Result<Vec<(String, String)>, String> {
     Ok(vars)
 }
 
+/// How a variable name matches a risky entry.
+enum Shape {
+    Exact(&'static str),
+    Prefix(&'static str),
+    Suffix(&'static str),
+}
+
+/// Names that change how programs load, start or talk, each with the reason shown to the user. A
+/// sample of the obvious, not a list of what is safe: a name that is not here says nothing.
+/// Matching ignores case, as Windows does and as proxy variables are written both ways.
+const RISKY: &[(Shape, &str)] = &[
+    // Loading and starting.
+    (Shape::Exact("PATH"), "changes which programs start"),
+    (Shape::Prefix("LD_"), "changes how programs are loaded"),
+    (Shape::Prefix("DYLD_"), "changes how programs are loaded"),
+    (Shape::Exact("BASH_ENV"), "runs a file when a shell starts"),
+    (Shape::Exact("ENV"), "runs a file when a shell starts"),
+    (Shape::Exact("ZDOTDIR"), "changes which shell startup files run"),
+    (Shape::Exact("NODE_OPTIONS"), "changes how Node starts"),
+    (Shape::Exact("NODE_PATH"), "changes which Node modules load"),
+    (Shape::Prefix("PYTHON"), "changes how Python starts"),
+    (Shape::Exact("RUBYOPT"), "changes how Ruby starts"),
+    (Shape::Exact("RUBYLIB"), "changes which Ruby code loads"),
+    (Shape::Exact("PERL5OPT"), "changes how Perl starts"),
+    (Shape::Exact("PERL5LIB"), "changes which Perl code loads"),
+    (Shape::Exact("JAVA_TOOL_OPTIONS"), "changes how Java starts"),
+    (Shape::Exact("_JAVA_OPTIONS"), "changes how Java starts"),
+    (Shape::Exact("JDK_JAVA_OPTIONS"), "changes how Java starts"),
+    (Shape::Exact("CLASSPATH"), "changes which Java code loads"),
+    (Shape::Prefix("GIT_"), "changes how git behaves"),
+    (Shape::Prefix("NPM_CONFIG_"), "changes how npm behaves"),
+    // Where programs read their files.
+    (Shape::Exact("HOME"), "changes where programs read their files"),
+    (Shape::Prefix("XDG_"), "changes where programs read their files"),
+    (Shape::Exact("TMPDIR"), "changes where programs keep temporary files"),
+    // Where secrets go.
+    (Shape::Suffix("_PROXY"), "sends traffic through another server"),
+    (Shape::Prefix("SSL_CERT_"), "changes which certificates are trusted"),
+    (Shape::Suffix("_CA_BUNDLE"), "changes which certificates are trusted"),
+    (Shape::Exact("NODE_EXTRA_CA_CERTS"), "changes which certificates are trusted"),
+    (Shape::Suffix("_BASE_URL"), "changes where requests go"),
+    (Shape::Suffix("_API_BASE"), "changes where requests go"),
+    (Shape::Suffix("_ENDPOINT"), "changes where requests go"),
+];
+
+/// Why a variable name is worth a second look, as `PATH: <reason>` reads, or `None`.
+pub fn risky_reason(name: &str) -> Option<&'static str> {
+    let name = name.to_ascii_uppercase();
+    RISKY.iter().find_map(|(shape, reason)| {
+        let hit = match shape {
+            Shape::Exact(n) => name == *n,
+            Shape::Prefix(p) => name.starts_with(p),
+            Shape::Suffix(x) => name.ends_with(x),
+        };
+        hit.then_some(*reason)
+    })
+}
+
+/// A bare program name resolved against this process's `PATH`; a name with a separator is left
+/// as given, and so is one that is not found (the start then reports it).
+fn resolve_program(program: &str) -> PathBuf {
+    if program.contains(['/', std::path::MAIN_SEPARATOR]) {
+        return PathBuf::from(program);
+    }
+    let Some(path) = std::env::var_os("PATH") else { return PathBuf::from(program) };
+    #[cfg(windows)]
+    let extensions: Vec<String> =
+        std::env::var("PATHEXT").unwrap_or(".COM;.EXE;.BAT;.CMD".into()).split(';').map(str::to_owned).chain([String::new()]).collect();
+    #[cfg(not(windows))]
+    let extensions = [String::new()];
+    for dir in std::env::split_paths(&path).filter(|d| d.is_absolute()) {
+        for ext in &extensions {
+            let candidate = dir.join(format!("{program}{ext}"));
+            if is_executable(&candidate) {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::from(program)
+}
+
+fn is_executable(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else { return false };
+    #[cfg(unix)]
+    return meta.is_file() && std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 != 0;
+    #[cfg(not(unix))]
+    return meta.is_file();
+}
+
 /// Runs `argv` with this terminal's input and output and `env` added to the environment; its
 /// exit code (on Unix 128 + the signal that ended it, 127 if it could not start).
 pub fn run_child(argv: &[String], env: &[(String, String)]) -> i32 {
     let Some((program, args)) = argv.split_first() else { return 2 };
-    let status = std::process::Command::new(program).args(args).envs(env.iter().map(|(k, v)| (k, v))).status();
+    let status = std::process::Command::new(resolve_program(program)).args(args).envs(env.iter().map(|(k, v)| (k, v))).status();
     match status {
         Ok(status) => {
             #[cfg(unix)]
@@ -496,6 +588,77 @@ mod tests {
         let e = parse_env("1BAD=sk-live-SECRET").unwrap_err();
         assert!(e.contains("line 1") && !e.contains("SECRET"), "{e}");
         assert!(parse_env("# only comments\n").unwrap_err().contains("no KEY=VALUE"));
+    }
+
+    #[test]
+    fn a_repeated_key_is_refused_by_line_number_in_any_case() {
+        let e = parse_env("A=1\nB=2\na=sk-live-SECRET\n").unwrap_err();
+        assert_eq!(e, "line 3 repeats a key");
+        let e = parse_env("export PATH=x\nPath=sk-live-SECRET").unwrap_err();
+        assert!(e.contains("line 2") && !e.contains("SECRET"), "{e}");
+        assert!(parse_env("A=1\nB=1").is_ok());
+    }
+
+    #[test]
+    fn risky_names_have_a_reason_and_others_none() {
+        for name in [
+            "PATH",
+            "Path",
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
+            "BASH_ENV",
+            "ENV",
+            "ZDOTDIR",
+            "NODE_OPTIONS",
+            "NODE_PATH",
+            "PYTHONPATH",
+            "PYTHONSTARTUP",
+            "RUBYOPT",
+            "RUBYLIB",
+            "PERL5OPT",
+            "PERL5LIB",
+            "JAVA_TOOL_OPTIONS",
+            "_JAVA_OPTIONS",
+            "JDK_JAVA_OPTIONS",
+            "CLASSPATH",
+            "GIT_SSH_COMMAND",
+            "NPM_CONFIG_REGISTRY",
+            "npm_config_registry",
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "TMPDIR",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "REQUESTS_CA_BUNDLE",
+            "CURL_CA_BUNDLE",
+            "NODE_EXTRA_CA_CERTS",
+            "OPENAI_BASE_URL",
+            "OPENAI_API_BASE",
+            "AWS_ENDPOINT",
+        ] {
+            assert!(risky_reason(name).is_some_and(|r| !r.is_empty() && !r.contains("safe")), "{name}");
+        }
+        assert_eq!(risky_reason("PATH"), Some("changes which programs start"));
+        for name in ["API_KEY", "DATABASE_URL", "OPENAI_API_KEY", "PATHS", "ENVIRONMENT", "MY_HOME", "PROXY", "DEBUG"] {
+            assert_eq!(risky_reason(name), None, "{name}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_note_path_cannot_swap_the_program() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("planted");
+        let planted = dir.join("sh");
+        std::fs::write(&planted, "#!/bin/sh\nexit 99\n").unwrap();
+        std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let env = [("PATH".to_owned(), dir.display().to_string())];
+        // The real `sh` runs, though the note's PATH holds only the planted one.
+        assert_eq!(run_child(&["sh".into(), "-c".into(), "exit 7".into()], &env), 7);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(unix)]
