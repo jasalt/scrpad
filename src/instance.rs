@@ -537,18 +537,35 @@ fn within<T>(stream: &Stream, limit: Duration, exchange: impl FnOnce() -> T) -> 
 
 /// Runs `exchange` on `stream` and, once `limit` has passed, cancels its pending read or write
 /// (and any it starts after that) until it returns. Named pipes have no timeouts of their own.
+/// The server's `Stream` does overlapped I/O, which `CancelIoEx` on its handle cancels; the
+/// client's `File` does synchronous I/O, which `CancelSynchronousIo` on this thread cancels.
+/// Both are called each time, for either end.
 #[cfg(windows)]
 fn within<T>(stream: &impl AsPipe, limit: Duration, exchange: impl FnOnce() -> T) -> T {
-    use std::os::windows::io::AsRawHandle;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::sync::mpsc;
+    use windows_sys::Win32::System::IO::{CancelIoEx, CancelSynchronousIo};
+    use windows_sys::Win32::System::Threading::{GetCurrentThreadId, OpenThread, THREAD_TERMINATE};
     let handle = stream.pipe().as_raw_handle() as usize;
+    // SAFETY: OpenThread takes no pointers; this thread's ID is valid while it runs.
+    let thread = unsafe { OpenThread(THREAD_TERMINATE, 0, GetCurrentThreadId()) };
+    // SAFETY: a handle OpenThread returned is open and only we own it; null is checked first.
+    let owned = (!thread.is_null()).then(|| unsafe { OwnedHandle::from_raw_handle(thread) });
+    let thread = owned.as_ref().map(|thread| thread.as_raw_handle() as usize);
     let (done, finished) = mpsc::channel::<()>();
+    // The scope waits for the canceller before this thread does anything else, so it never
+    // cancels I/O beyond `exchange`.
     std::thread::scope(|scope| {
         scope.spawn(move || {
             let mut wait = limit;
             while finished.recv_timeout(wait) == Err(mpsc::RecvTimeoutError::Timeout) {
                 // SAFETY: `stream` outlives the scope, so the handle stays open while this runs.
-                unsafe { windows_sys::Win32::System::IO::CancelIoEx(handle as _, std::ptr::null()) };
+                unsafe { CancelIoEx(handle as _, std::ptr::null()) };
+                if let Some(thread) = thread {
+                    // SAFETY: the thread handle is owned outside the scope, so it stays open, and
+                    // it was opened with THREAD_TERMINATE, which CancelSynchronousIo needs.
+                    unsafe { CancelSynchronousIo(thread as _) };
+                }
                 wait = Duration::from_millis(50);
             }
         });
@@ -841,6 +858,23 @@ mod tests {
             assert!(text.contains(&format!("line {i}")), "line {i} was lost: {text:?}");
         }
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_server_that_never_answers_does_not_hold_a_launch() {
+        let path = temp_socket("hung");
+        let listener = listen(path.as_path().to_fs_name::<GenericFilePath>().unwrap()).unwrap();
+        let (hang_up, held) = mpsc::channel::<()>();
+        // Takes the connection, then neither reads nor writes until the test is done.
+        std::thread::spawn(move || {
+            let _stream = listener.accept();
+            let _ = held.recv();
+        });
+        let started = Instant::now();
+        assert!(matches!(claim(&path, &Command::Show).unwrap(), Claim::Refused(_)));
+        assert!(started.elapsed() < ANSWER_TIMEOUT + Duration::from_secs(3), "{:?}", started.elapsed());
+        drop(hang_up);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
