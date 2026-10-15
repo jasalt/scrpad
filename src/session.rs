@@ -370,6 +370,7 @@ impl Session {
             return false;
         }
         self.take_appends(window, None);
+        self.state.prune_run_names();
         match self.path.as_ref().map_or(Ok(()), |path| self.state.save(path)) {
             Ok(()) => {
                 // A toast (and its Undo) stays: it was shown beside the error and expires on its own.
@@ -866,13 +867,11 @@ impl Session {
     }
 
     /// The names of an allowed `--run`, for the next one to compare with: in the file for a
-    /// plain or hidden note, in this session only for an encrypted one.
+    /// plain or hidden note, in this session only for an encrypted one. Saving drops what a
+    /// rename, closing or encrypting left in `state.run_names` (`State::prune_run_names`).
     fn remember_run_names(&mut self, title: &str, encrypted: bool, names: Vec<String>, now: f64) {
         if encrypted {
             self.run_names_secret.insert(title.to_owned(), names);
-            if self.state.run_names.remove(title).is_some() {
-                self.mark_dirty(now);
-            }
         } else if self.state.run_names.get(title) != Some(&names) {
             self.state.run_names.insert(title.to_owned(), names);
             self.mark_dirty(now);
@@ -1027,10 +1026,6 @@ impl Session {
             return Err(crypto::Error::InvalidFormat);
         }
         note.encrypt(password)?;
-        // Its `--run` names leave the file with its plaintext; see `remember_run_names`.
-        let title = note.title.clone();
-        self.state.run_names.remove(&title);
-        let note = self.state.current_mut();
         self.epoch += 1;
         let (id, hash) = (note.id, text_hash(&note.text));
         self.sealed.insert(id, hash);
@@ -1418,7 +1413,7 @@ mod tests {
 
     #[test]
     fn a_run_shows_the_names_a_first_time_and_then_the_new_names() {
-        let (mut s, dir) = session_saving("run-names", vec![note(".env", "API_KEY=sk-1\nPATH=/x")]);
+        let (mut s, dir) = session_saving("run-names-shown", vec![note(".env", "API_KEY=sk-1\nPATH=/x")]);
         let job = ask_run(&mut s);
         let shown = run_shown(&s).unwrap();
         assert_eq!(shown.names, ["API_KEY", "PATH"]);
@@ -1481,6 +1476,31 @@ mod tests {
         s.state.notes[0].text = "A=2".into();
         s.allow(None, 2.0).unwrap();
         assert_eq!(job.join().unwrap(), Reply::Error(RUN_CHANGED.into()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn names_leave_the_file_when_the_note_is_renamed_and_encrypted_or_closed() {
+        let (mut s, dir) =
+            session_saving("run-names-pruned", vec![note(".env", "RENAMED_NAME_XYZ=1"), note("old.env", "CLOSED_NAME_ABC=1")]);
+        for title in [".env", "old.env"] {
+            let job = ask_and_wait(&s, Command::Run { title: title.into(), argv: vec!["env".into()] });
+            wait_for_approval(&mut s, 1.0);
+            s.allow(None, 2.0).unwrap();
+            job.join().unwrap();
+        }
+        assert!(s.save_now());
+        let on_disk = || std::fs::read_to_string(dir.join("notes.json")).unwrap();
+        assert!(on_disk().contains("RENAMED_NAME_XYZ") && on_disk().contains("CLOSED_NAME_ABC"));
+        // Renamed as the frontends do, then encrypted: no name of the encrypted note stays.
+        s.state.active = 0;
+        s.state.notes[0].title = "prod.env".into();
+        s.encrypt_note("pw", 3.0).unwrap();
+        assert!(!on_disk().contains("RENAMED_NAME_XYZ"), "{}", on_disk());
+        // Closed: its names go with it.
+        s.close_note(1, 4.0);
+        assert!(s.save_now());
+        assert!(!on_disk().contains("CLOSED_NAME_ABC"), "{}", on_disk());
         let _ = std::fs::remove_dir_all(dir);
     }
 

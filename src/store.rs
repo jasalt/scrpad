@@ -277,6 +277,16 @@ impl State {
         sync_parent(path)
     }
 
+    /// Keeps the `--run` names only of titles a note still has and no encrypted note has: they
+    /// reach the file for a plain or hidden note, whatever renames, closing or encrypting did.
+    pub fn prune_run_names(&mut self) {
+        let notes = &self.notes;
+        self.run_names.retain(|title, _| {
+            let mut titled = notes.iter().filter(|n| n.title == *title).peekable();
+            titled.peek().is_some() && !titled.any(Note::is_encrypted)
+        });
+    }
+
     pub fn fix_up(&mut self) {
         if self.notes.is_empty() {
             self.notes.push(Note::new("Scratchpad 1".into()));
