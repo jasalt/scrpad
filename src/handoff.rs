@@ -330,6 +330,7 @@ const RISKY: &[(Shape, &str)] = &[
     (Shape::Prefix("XDG_"), "changes where programs read their files"),
     (Shape::Exact("TMPDIR"), "changes where programs keep temporary files"),
     // Where secrets go.
+    (Shape::Exact("NO_PROXY"), "changes which traffic skips the proxy"),
     (Shape::Suffix("_PROXY"), "sends traffic through another server"),
     (Shape::Prefix("SSL_CERT_"), "changes which certificates are trusted"),
     (Shape::Suffix("_CA_BUNDLE"), "changes which certificates are trusted"),
@@ -396,7 +397,11 @@ pub fn run_child(argv: &[String], env: &[(String, String)]) -> i32 {
             return 127;
         }
     };
-    let status = std::process::Command::new(program_path).args(args).envs(env.iter().map(|(k, v)| (k, v))).status();
+    let mut child = std::process::Command::new(program_path);
+    // The child sees its name as given, as it would from a shell, not the path found for it.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::arg0(&mut child, program);
+    let status = child.args(args).envs(env.iter().map(|(k, v)| (k, v))).status();
     match status {
         Ok(status) => {
             #[cfg(unix)]
@@ -651,6 +656,10 @@ mod tests {
             assert!(risky_reason(name).is_some_and(|r| !r.is_empty() && !r.contains("safe")), "{name}");
         }
         assert_eq!(risky_reason("PATH"), Some("changes which programs start"));
+        for name in ["NO_PROXY", "no_proxy"] {
+            assert_eq!(risky_reason(name), Some("changes which traffic skips the proxy"), "{name}");
+        }
+        assert_eq!(risky_reason("HTTPS_PROXY"), Some("sends traffic through another server"));
         for name in ["API_KEY", "DATABASE_URL", "OPENAI_API_KEY", "PATHS", "ENVIRONMENT", "MY_HOME", "PROXY", "DEBUG"] {
             assert_eq!(risky_reason(name), None, "{name}");
         }
@@ -672,6 +681,9 @@ mod tests {
         std::fs::set_permissions(dir.join("only-in-note"), std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(run_child(&["only-in-note".into()], &env), 127);
         assert!(resolve_program("only-in-note").unwrap_err().contains("only-in-note not found on PATH"));
+        // The child sees its name as given, not the path it was found at.
+        let name_as_given = r#"set -- $(ps -o args= -p $$); [ "$1" = sh ]"#;
+        assert_eq!(run_child(&["sh".into(), "-c".into(), name_as_given.into()], &[]), 0);
         let _ = std::fs::remove_dir_all(dir);
     }
 
