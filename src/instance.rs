@@ -213,23 +213,55 @@ pub fn claim(address: &Path, command: &Command) -> io::Result<Claim> {
                 Err(e) if e.kind() == io::ErrorKind::ConnectionReset && Instant::now() < give_up => continue,
                 Err(e) => return Ok(Claim::Refused(e)),
             },
-            // Nobody answered: what is left is a socket from a crashed run, safe to replace.
-            Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => match std::fs::remove_file(address) {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-                _ => {}
-            },
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
-        match listen(name.borrow()) {
-            Ok(listener) => return Ok(Claim::Listening(listener)),
-            // Another launch got there first: ask it instead. (Windows says so with access denied.)
-            Err(e)
-                if (e.kind() == io::ErrorKind::AddrInUse || cfg!(windows) && e.kind() == io::ErrorKind::PermissionDenied)
-                    && Instant::now() < give_up => {}
+            // Nobody answered: a socket from a crashed run is safe to replace, and where there is
+            // none this launch is the first. Either way it listens, one launch at a time.
+            Err(e) if matches!(e.kind(), io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound) => {
+                match replace_stale(address, name.borrow())? {
+                    Some(listener) => return Ok(Claim::Listening(listener)),
+                    // Another launch got there first and listens: ask it instead.
+                    None if Instant::now() < give_up => {}
+                    None => return Err(io::Error::new(io::ErrorKind::AddrInUse, "another scrpad is starting")),
+                }
+            }
             Err(e) => return Err(e),
         }
     }
+}
+
+/// Listens at `address`, replacing the socket of a crashed run. Two launches that both find a
+/// socket refused would otherwise both remove it, the second removing the first's live socket
+/// (or one that is between bind and listen, which refuses too), and both would act as the only
+/// instance. So, on Unix, one at a time holds the lock `scrpad.lock` from the second look at the
+/// socket until the listener exists; `None` when that look finds a live instance, or another
+/// launch listening first. (Windows says so with access denied; a pipe is never stale.)
+fn replace_stale(address: &Path, name: interprocess::local_socket::Name<'_>) -> io::Result<Option<Listener>> {
+    #[cfg(unix)]
+    let _lock = lock(address)?;
+    #[cfg(windows)]
+    let _ = address;
+    if Stream::connect(name.borrow()).is_ok() {
+        return Ok(None);
+    }
+    #[cfg(unix)]
+    match std::fs::remove_file(address) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    match listen(name) {
+        Ok(listener) => Ok(Some(listener)),
+        Err(e) if e.kind() == io::ErrorKind::AddrInUse || cfg!(windows) && e.kind() == io::ErrorKind::PermissionDenied => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// An exclusive lock on `scrpad.lock` next to the socket, held until the returned file is dropped.
+#[cfg(unix)]
+fn lock(address: &Path) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file =
+        std::fs::OpenOptions::new().create(true).truncate(false).write(true).mode(0o600).open(address.with_file_name("scrpad.lock"))?;
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
+    Ok(file)
 }
 
 /// The socket is left behind on exit (a later launch replaces it), so the listener never removes it:
@@ -536,6 +568,37 @@ mod tests {
         assert!(path.exists());
         assert!(matches!(claim(&path, &Command::Show).unwrap(), Claim::Listening(_)));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launches_racing_for_a_stale_socket_lose_no_append() {
+        const N: usize = 8;
+        let path = temp_socket("race");
+        let notes = path.with_file_name("notes.json");
+        crate::store::State::default().save(&notes).unwrap();
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        let launches: Vec<_> = (0..N)
+            .map(|i| {
+                let (path, notes) = (path.clone(), notes.clone());
+                std::thread::spawn(move || {
+                    // What a windowless `--append` does (src/launch.rs): claim, then work under `hold`.
+                    let command = append("Agent", &format!("line {i}"));
+                    let Claim::Listening(listener) = claim(&path, &command).unwrap() else { panic!("nobody serves here") };
+                    let reply = hold(listener, &path, || crate::scripts::answer(Some(&notes), &command, None));
+                    assert_eq!(reply, Reply::Ok);
+                })
+            })
+            .collect();
+        for launch in launches {
+            launch.join().unwrap();
+        }
+        let state = crate::store::State::load(&notes).unwrap();
+        let text = &state.notes.iter().find(|n| n.title == "Agent").expect("the note").text;
+        for i in 0..N {
+            assert!(text.contains(&format!("line {i}")), "line {i} was lost: {text:?}");
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
