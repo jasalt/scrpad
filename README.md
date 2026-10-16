@@ -292,7 +292,11 @@ Hiding and encryption are independent. Use both for secrets that should neither 
 - **Windows** 10 2004 and later: `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`, honoured by Print Screen, the Snipping Tool, OBS and the screen sharing of Teams, Zoom and browsers.
 - **macOS**: the window's sharing type is set to none. Newer macOS versions (15 and later) may no longer honour this for apps that capture with ScreenCaptureKit.
 - **Hyprland**: the window property `no_screen_share`, which covers everything that captures through the compositor (grim, OBS, screen sharing through the desktop portal).
-- **Other Linux desktops**: not possible. Wayland has no protocol for an app to ask this, and on X11 any app can read the whole screen. The icon's tooltip says so.
+- **KDE Plasma**: Plasma 6.6 supports excluding windows from screencasts; 6.7 adds screenshots and persistent window rules. Users can configure exclusion for scrpad, but automatic integration is not yet implemented.
+- **niri**: supports excluding windows through its `block-out-from` window rule. Users can configure this for scrpad; automatic integration is not yet implemented.
+- **Other Linux desktops**: Wayland has no widely supported protocol for apps to request capture exclusion, but individual compositors may support it through their own mechanisms. X11 has no reliable equivalent and any app can read the whole screen. The icon's tooltip indicates when scrpad cannot enable protection.
+
+Support for additional Wayland compositors may be added.
 
 This keeps notes out of a careless share or recording. It is not protection against someone set on capturing the screen: a phone camera, a capture card or software running with enough privileges sees the window as it is.
 
